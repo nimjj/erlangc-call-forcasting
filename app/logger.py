@@ -57,6 +57,3 @@ def setup_logging() -> logging.Logger:
     return logging.getLogger("app")
 
 logger = setup_logging()
-
-def get_logger(name: str) -> logging.Logger:
-    return logging.getLogger(name)

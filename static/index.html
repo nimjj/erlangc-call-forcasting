@@ -502,7 +502,7 @@
                         id="fileRequirementNote"
                         class="note"
                     >
-                        Upload one or more CDR files containing historical call records.
+                        Upload historical CDR files. At least 14 calendar days uses weekly STL; shorter histories use rolling profiles. Gaps are treated as zero calls.
                     </div>
 
                     <div
@@ -963,7 +963,6 @@
     let timeChartInstance = null;
     let precomputedDailyData = {};
     let monthlyDataCache = [];
-    let weekdayAggregateCache = [];
     let timeOfDayAggregateCache = [];
     let forecastDateSet = new Set();
 
@@ -1098,21 +1097,6 @@
             month: parsed.getUTCMonth() + 1,
             weekday: (parsed.getUTCDay() + 6) % 7
         };
-    }
-
-    function weekdayAggregateValues() {
-        const values = Array(7).fill(0);
-        const weekdayIndexes = {
-            Monday: 0, Tuesday: 1, Wednesday: 2, Thursday: 3,
-            Friday: 4, Saturday: 5, Sunday: 6
-        };
-        for (const row of weekdayAggregateCache) {
-            const weekday = weekdayIndexes[row.weekday_name];
-            if (weekday !== undefined) {
-                values[weekday] = Number(row.average_calls) || 0;
-            }
-        }
-        return values;
     }
 
     function getMonthWeeks(year, month) {
@@ -1420,7 +1404,6 @@
 
         const monthly = chartData.monthly || [];
         monthlyDataCache = monthly;
-        weekdayAggregateCache = chartData.weekday || [];
         timeOfDayAggregateCache = chartData.time_of_day || [];
 
         selectedMonthIndex = 0;
@@ -1880,7 +1863,7 @@
                     "status success";
 
                 statusElement.textContent =
-                    `Completed STL forecast: ${data.days} days, period ${data.seasonal_period}, and ${data.forecast_interval_count.toLocaleString()} Erlang C intervals.`;
+                    `Completed ${data.method === "STL" ? "STL decomposition" : "rolling-profile fallback"} forecast: ${data.days} days, period ${data.seasonal_period}, and ${data.forecast_interval_count.toLocaleString()} Erlang C intervals.${data.decomposition_summary?.fallback_reason ? " " + data.decomposition_summary.fallback_reason : ""}`;
 
             }
 

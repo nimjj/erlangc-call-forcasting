@@ -22,7 +22,6 @@ from app.core.scheduling import (
     build_shift_requirements,
     calculate_schedule_headcount,
     build_monthly_agent_schedule,
-    validate_agent_rest_period,
 )
 
 __all__ = [
@@ -45,5 +44,4 @@ __all__ = [
     "build_shift_requirements",
     "calculate_schedule_headcount",
     "build_monthly_agent_schedule",
-    "validate_agent_rest_period",
 ]

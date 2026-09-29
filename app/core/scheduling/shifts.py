@@ -27,20 +27,6 @@ def shift_definitions(start_times: list[str] | None = None) -> list[dict]:
     return result
 
 
-def row_shift_hours(row) -> dict:
-    label = str(row.get("shift", ""))
-    if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d", label):
-        start = int(label[:2]) + int(label[3:5]) / 60
-        end = int(label[6:8]) + int(label[9:11]) / 60
-        if end <= start:
-            end += 24
-        if abs(end - start - 8) > 0.000001:
-            raise ValueError("Each working shift must last exactly 8 hours.")
-        return {"start": start, "end": end}
-    shift = next(shift for shift in SHIFT_DEFINITIONS if shift["code"] == row["shift_code"])
-    return {"start": shift["start_hour"], "end": shift["end_hour"]}
-
-
 def build_shift_requirements(
     forecast: pd.DataFrame,
     year: int | None = None,

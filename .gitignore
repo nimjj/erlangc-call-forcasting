@@ -21,7 +21,6 @@ logs/
 
 *.sqlite3
 
-tests/*
-tests/evidence/*
-
-!tests/test_manual_shift_times.py
+tests/
+docs/
+postman/

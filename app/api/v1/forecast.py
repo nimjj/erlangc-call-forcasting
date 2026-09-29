@@ -32,13 +32,13 @@ async def _save_upload(upload: UploadFile, destination: Path) -> None:
     if total_bytes == 0:
         raise HTTPException(status_code=400, detail=f"{upload.filename or 'Uploaded file'} is empty.")
 
-@router.post("/stl-forecast", summary="Forecast demand and staffing", description="Generate rolling-profile forecasts and Erlang C staffing. The legacy URL is retained for compatibility.")
+@router.post("/stl-forecast", summary="Forecast demand and staffing", description="Generate STL forecasts and Erlang C staffing, with a labeled rolling-profile fallback for short history.")
 async def stl_forecast(
     files: Annotated[list[UploadFile], File(description="One or more CDR CSV files with at least one day of valid records")],
     interval_minutes: Annotated[int, Form()] = 30,
     forecast_days: Annotated[int, Form(description="365 selects automatic duration: 1-6 historical days -> next day; 7-27 -> next 7 days; 28 days to under 12 months -> next calendar month; 12+ months -> next calendar year. Other values override, except histories under 7 days always predict one day.")] = 365,
-    seasonal_period: Annotated[int | None, Form(description="Legacy compatibility metadata; not used to calculate rolling profiles. Nonzero values must be at least 2.")] = None,
-    trend_lookback_days: Annotated[int, Form(description="Legacy compatibility metadata; must be at least 7. Not used to calculate rolling profiles.")] = 90,
+    seasonal_period: Annotated[int | None, Form(description="STL cycle length in intervals; omitted or zero defaults to one week. At least 2. Fewer than two cycles uses rolling-profile fallback.")] = None,
+    trend_lookback_days: Annotated[int, Form(description="Recent days of the STL trend used for linear extrapolation; at least 7, limited to available history. Not used by rolling-profile fallback.")] = 90,
     target_seconds: Annotated[float, Form()] = 20,
     target_service_level: Annotated[float, Form()] = 80,
     shrinkage: Annotated[float, Form()] = 30,
@@ -113,8 +113,8 @@ async def stl_forecast_async(
     files: Annotated[list[UploadFile], File(description="One or more CDR CSV files with at least one day of valid records")],
     interval_minutes: Annotated[int, Form()] = 30,
     forecast_days: Annotated[int, Form(description="365 selects automatic duration: 1-6 historical days -> next day; 7-27 -> next 7 days; 28 days to under 12 months -> next calendar month; 12+ months -> next calendar year. Other values override, except histories under 7 days always predict one day.")] = 365,
-    seasonal_period: Annotated[int | None, Form(description="Legacy compatibility metadata; not used to calculate rolling profiles. Nonzero values must be at least 2.")] = None,
-    trend_lookback_days: Annotated[int, Form(description="Legacy compatibility metadata; must be at least 7. Not used to calculate rolling profiles.")] = 90,
+    seasonal_period: Annotated[int | None, Form(description="STL cycle length in intervals; omitted or zero defaults to one week. At least 2. Fewer than two cycles uses rolling-profile fallback.")] = None,
+    trend_lookback_days: Annotated[int, Form(description="Recent days of the STL trend used for linear extrapolation; at least 7, limited to available history. Not used by rolling-profile fallback.")] = 90,
     target_seconds: Annotated[float, Form()] = 20,
     target_service_level: Annotated[float, Form()] = 80,
     shrinkage: Annotated[float, Form()] = 30,

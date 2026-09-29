@@ -1,0 +1,20 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    volumes:
+      - app-logs:/app/logs
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m,mode=1777
+    stop_grace_period: 30s
+
+volumes:
+  app-logs:

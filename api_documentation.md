@@ -16,7 +16,7 @@ Interactive documentation:
 |---|---|---|---|
 | `GET` | `/` | — | Serve dashboard or return service information |
 | `GET` | `/health` | — | Return health and version |
-| `POST` | `/api/v1/cdr/stl-forecast` | `multipart/form-data` | Forecast calls using rolling profiles and calculate Erlang C staffing |
+| `POST` | `/api/v1/cdr/stl-forecast` | `multipart/form-data` | Forecast calls using STL (rolling fallback for short history) and calculate Erlang C staffing |
 | `POST` | `/api/v1/cdr/stl-forecast/async` | `multipart/form-data` | Submit background forecast job |
 | `GET` | `/api/v1/jobs/{job_id}` | JSON response | Read job progress and completed result |
 | `GET` | `/api/v1/jobs/{job_id}/stream` | `text/event-stream` response | Stream job progress |
@@ -54,7 +54,7 @@ Otherwise the fallback response is service information similar to:
 
 # POST `/api/v1/cdr/stl-forecast`
 
-Forecast future contact volume using recursive rolling profiles and calculate Erlang C staffing for every future interval. The existing stl-forecast URLs are retained for compatibility; the current forecasting method is ROLLING_PROFILE.
+Forecast future contact volume using robust STL decomposition and calculate Erlang C staffing for every future interval. Spans under 14 days, or histories shorter than two requested seasonal cycles, use a labeled rolling-profile fallback. The response reports `method: STL` or `method: ROLLING_PROFILE`.
 
 ## Content type
 
@@ -69,8 +69,8 @@ multipart/form-data
 | `files` | repeated file | — | yes | 1-10 non-empty `.csv`/`.txt` files; maximum 25 MiB per file |
 | `interval_minutes` | integer | `30` | no | > 0 and exact divisor of 1440 |
 | `forecast_days` | integer | `365` | no | 1-3650; the default 365 selects the automatic forecast period below |
-| `seasonal_period` | integer or omitted | automatic | no | Compatibility metadata; >= 2 when nonzero; omitted/0 resolves to intervals per week |
-| `trend_lookback_days` | integer | `90` | no | Compatibility metadata; >= 7 |
+| `seasonal_period` | integer or omitted | automatic | no | STL cycle length in intervals; >= 2 when nonzero; omitted/0 resolves to intervals per week |
+| `trend_lookback_days` | integer | `90` | no | Recent days of STL trend used for linear extrapolation; >= 7 |
 | `target_seconds` | number | `20` | no | >= 0 |
 | `target_service_level` | number | `80` | no | after percent conversion, strictly between 0 and 1 |
 | `shrinkage` | number | `30` | no | after percent conversion, >= 0 and < 1 |
@@ -79,7 +79,7 @@ multipart/form-data
 
 Both `80` and `0.80` are accepted as an 80% service-level target. Likewise `30` and `0.30` represent 30% shrinkage. Values greater than 1 are divided by 100; values at or below 1 are interpreted as fractions. Exactly `1` means 100% and is rejected for both settings. Send numeric form values without a `%` suffix.
 
-The legacy seasonal_period and trend_lookback_days fields are validated and echoed in responses, but do not control the current rolling-profile calculation.
+`seasonal_period` controls the STL decomposition cycle. `trend_lookback_days` selects how much of the extracted trend is used for its fitted forecast line, capped by available history. These parameters are validated and returned for all requests but are not used to calculate rolling fallback predictions.
 
 ### Dashboard request settings
 
@@ -156,7 +156,9 @@ A row is retained only when:
 - disposition is `Answered` by default;
 - duration is between 1 second and 4 hours by default.
 
-The reader also accepts the header-based call-export schema with `Call ID`, `Date`, `Caller ID`, `Queue`, and `Talk time`. `Date` is parsed as a normal timestamp, `Talk time` is converted from `HH:MM:SS` or day/hour/minute/second text, and positive talk time marks the call as answered.
+Read attempts use the pandas Python parser and check recognized headers before trying seven headerless columns. Upload names without an extension default to `.csv`.
+
+The reader also accepts the header-based call-export schema with `Call ID`, `Date`, `Caller ID`, `Queue`, and `Talk time`. `Date` is parsed as a normal timestamp, `Talk time` is converted from `HH:MM:SS` or day/hour/minute/second text, and rows are marked answered before duration cleaning; only durations from 1 second through 4 hours survive. Other export columns are ignored.
 
 ## Dataset validation
 
@@ -173,9 +175,15 @@ read file
 → combine all available history
 ```
 
-The forecast window follows the automatic-duration rules above. Available call intervals from every file are combined; overlapping records are added rather than deduplicated. Missing months are not padded into a full calendar year.
+The forecast window follows the automatic-duration rules above independently of method selection. Calls from overlapping uploads are added, not deduplicated.
 
-Each forecast day's call profile is estimated from earlier daily profiles. Depending on available profile history, the calculation uses earlier days, matching weekdays, month-position matches, or prior-year period matches, with fallback profiles. Predicted days are then included when predicting later days. The current implementation does not run STL decomposition.
+For STL, the history is reindexed to a continuous interval grid from the first valid date at midnight through the last valid date at day end. Missing intervals and whole dates are zero-filled, including partial-day boundaries. This assumes complete CDR coverage; missing uploads are interpreted as zero demand.
+
+When the historical span is at least 14 days and the grid contains at least `2 * seasonal_period` intervals, `statsmodels.tsa.seasonal.STL(..., robust=True)` fits trend, seasonal, and residual components. A straight line fitted to the recent extracted trend is extrapolated, and the last fitted seasonal cycle is repeated. Calendar gaps between history and the forecast window advance both components. Their sum is clipped at zero and rounded to whole calls; residual noise is not included in predictions, and forecast values are not refitted as history.
+
+Otherwise the method is `ROLLING_PROFILE`: earlier daily patterns are averaged recursively, using matching weekdays/calendar positions where available. The response sets `decomposition_summary.applied=false` and includes `fallback_reason`. Errors fitting an eligible STL series are reported as errors, not silently converted to rolling forecasts.
+
+STL models one seasonal period. Annual horizons do not imply a separate yearly seasonal component. These are point forecasts without prediction intervals; linear extrapolation can overstate or understate distant demand. Evaluate accuracy against held-out observations.
 
 ### Future AHT
 
@@ -213,8 +221,8 @@ Representative shape:
 
 ```json
 {
-  "method": "ROLLING_PROFILE",
-  "logic": "Expanding day profiles, then weekly, monthly, and prior-year same-period profiles with new records included.",
+  "method": "STL",
+  "logic": "Robust STL decomposition with recent linear trend extrapolation and repeating seasonal cycle.",
   "dataset_count": 2,
   "historical_years": [2023, 2024],
   "historical_days": 731,
@@ -245,7 +253,21 @@ Representative shape:
   "decomposition_summary": {
     "historical_intervals": 35088,
     "prediction_start": "2025-01-01T00:00:00",
-    "prediction_strategy": "day-to-day, week-to-week, month-to-month, then year-to-year rolling profiles"
+    "prediction_strategy": "Robust STL decomposition with recent linear trend extrapolation and repeating seasonal cycle.",
+    "applied": true,
+    "observed_intervals": 20000,
+    "zero_filled_intervals": 15088,
+    "historical_span_days": 731,
+    "seasonal_period": 336,
+    "robust": true,
+    "trend_lookback_intervals": 4320,
+    "trend_start": 3.2,
+    "trend_end": 4.1,
+    "trend_slope_per_interval": 0.00001,
+    "seasonal_min": -2.0,
+    "seasonal_max": 3.5,
+    "residual_std": 0.9,
+    "reconstruction_max_error": 0.0
   },
   "parameters": {
     "interval_minutes": 30,
@@ -270,6 +292,25 @@ Representative shape:
 Example values above are illustrative; actual values come from the uploaded CDR data. Summary AHT uses weights `max(call_volume, 1)`. Summary service level, occupancy, and ASA are arithmetic means over intervals. `parameters.target_service_level_percent` and `parameters.shrinkage_percent` echo the original request values, so fractional inputs remain fractional in those fields.
 
 `day_of_year` is the calendar day-of-year, and `weekday` uses 0 for Monday through 6 for Sunday. Timestamps have no timezone suffix.
+
+For rolling fallback, `decomposition_summary` retains the grid counts, span, period, prediction start, and strategy, but sets `applied=false` and adds `fallback_reason`. STL-only fields such as `trend_slope_per_interval` and `residual_std` are omitted. `historical_intervals` includes zero-filled slots; `observed_intervals` counts slots containing cleaned calls. `reconstruction_max_error` measures the historical reconstruction error of trend + seasonal + residual, not forecast accuracy.
+
+## Chart response fields and dashboard calculations
+
+| Array | Fields and meaning |
+|---|---|
+| `charts.monthly` | `month_label`, total `call_volume`, `max_scheduled_agents`, mean `average_occupancy_percent`, mean `average_service_level_percent` |
+| `charts.daily` | `date`, total `call_volume`, `max_scheduled_agents`, mean `average_service_level_percent`, mean `average_occupancy_percent`, mean `average_asa_seconds` |
+| `charts.weekday` | `weekday_name` in Monday-Sunday order, `average_calls` per source interval across the entire forecast, `max_scheduled_agents` |
+| `charts.time_of_day` | `time_label` in HH:MM order, `average_calls` and `average_scheduled_agents` per time slot across the entire forecast |
+
+Aggregates are rounded to two decimal places. The monthly grouping uses month number/name without year, so it combines matching months across years.
+
+The dashboard's **Average daily calls by weekday** chart uses daily totals, not `charts.weekday.average_calls`. A selected week shows the call total for each date. All-weeks mode divides each weekday's total calls by the number of forecast dates for that weekday in the selected month, including zero-call dates. Weeks follow Monday-Sunday calendar boundaries; days outside the month or missing forecast dates are blank. Zero calls and missing data can both appear empty, but only real zero-call dates count in averages.
+
+Clicking a month selects its first calendar week; clicking a weekday bar in a specific week selects its exact date. The time chart averages source intervals by time slot for the selected week/month or shows one selected date. If no interval rows are available, it falls back to overall `charts.time_of_day` averages. Chart selections do not rerun the forecast.
+
+The dashboard calendar uses the first forecast year, and the table/forecast CSV filter to the output year. Multi-year API forecasts should be analyzed directly from the returned rows; the dashboard does not provide separate chart navigation for each year.
 
 ## Forecast row
 
@@ -378,6 +419,8 @@ Send the forecast rows returned by the sync endpoint or result.forecast from a c
 }
 ```
 
+The API roster covers every calendar date in the requested month, while coverage requirements use dates present in the forecast. The dashboard daily staffing table displays only forecast dates in that month.
+
 This small example demonstrates the request format. Supply the complete forecast for actual monthly staffing, including adjacent dates when available for overnight shifts.
 
 | Field | Type | Validation |
@@ -431,7 +474,7 @@ The estimate does not guarantee full coverage under the greedy assignment and re
 - no more than one shift per agent per day;
 - no more than five working days per Monday-Sunday week;
 - at least eight hours between successive working shifts within the generated month;
-- unassigned dates become `OFF`;
+- unassigned dates become `OFF`, including dates without forecast demand;
 - assignments are balanced using existing weekly workload, total assignments, shift-specific assignments, and agent ID.
 
 ## Response
@@ -566,7 +609,7 @@ CSV downloads are assembled in the browser. The forecast and scheduling endpoint
 | `Scheduled agents` | Maximum `scheduled_agents` within the hour |
 | `Service level %` | Call-weighted `service_level_percent`, formatted to two decimals |
 
-For zero-call hours, AHT and service level use arithmetic averages of the source intervals. These calculations match the dashboard table. The last hourly label ends at `24:00`. A full-year export contains 8,760 data rows, or 8,784 in a leap year. Forecasts created before leap-day support must be regenerated to include February 29.
+For zero-call hours, AHT and service level use arithmetic averages of the source intervals. These calculations match the dashboard table. The last hourly label ends at `24:00`. A full-year export contains 8,760 data rows, or 8,784 in a leap year. Shorter forecasts export only the available dates; the filename does not imply a complete year.
 
 ## Daily scheduled agents CSV
 

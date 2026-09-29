@@ -4,3 +4,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 numpy>=1.24
+statsmodels>=0.14,<0.15

@@ -5,6 +5,7 @@ from typing import Callable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from statsmodels.tsa.seasonal import STL
 
 from app.core.constants import FORECAST_COLUMNS
 from app.core.ingestion.reader import read_cdr_csv
@@ -72,6 +73,52 @@ def _predict_day_profile(
         source_days = same_year_period or same_month or prior_days[-366:]
 
     return np.rint(np.mean([profiles[profile_day] for profile_day in source_days], axis=0)).astype(int)
+
+
+def _stl_predict(
+    series: pd.Series,
+    future_index: pd.DatetimeIndex,
+    period: int,
+    trend_lookback_intervals: int,
+) -> tuple[np.ndarray, dict]:
+    """Fit observed history once; extrapolate trend and repeat the last seasonal cycle."""
+    if len(series) < 2 * period:
+        raise ValueError("STL requires at least two seasonal cycles of history.")
+    values = series.to_numpy(dtype=float)
+    if not np.isfinite(values).all() or (values < 0).any():
+        raise ValueError("Historical call counts must be finite and non-negative.")
+    fit = STL(values, period=period, robust=True).fit()
+    trend = np.asarray(fit.trend)
+    seasonal = np.asarray(fit.seasonal)
+    residual = np.asarray(fit.resid)
+    if not all(np.isfinite(component).all() for component in (trend, seasonal, residual)):
+        raise ValueError("STL decomposition produced non-finite components.")
+
+    lookback = min(len(trend), trend_lookback_intervals)
+    # Center on the last observation so the intercept is the fitted terminal level.
+    x = np.arange(lookback, dtype=float) - (lookback - 1)
+    slope, level = np.polyfit(x, trend[-lookback:], 1)
+    interval = series.index[1] - series.index[0]
+    steps = np.asarray((future_index - series.index[-1]) / interval, dtype=float)
+    if (steps < 1).any() or not np.allclose(steps, np.rint(steps)):
+        raise ValueError("Forecast dates must follow history on the same interval grid.")
+    # Calendar-month/year forecasts may skip dates; advance both trend and phase.
+    future_trend = level + slope * steps
+    future_seasonal = seasonal[-period:][(steps.astype(np.int64) - 1) % period]
+    prediction = np.maximum(future_trend + future_seasonal, 0)
+    if not np.isfinite(prediction).all() or (prediction >= np.iinfo(np.int64).max).any():
+        raise ValueError("STL extrapolation exceeds the supported call-count range.")
+    return np.rint(prediction).astype(np.int64), {
+        "robust": True,
+        "trend_lookback_intervals": int(lookback),
+        "trend_start": float(trend[0]),
+        "trend_end": float(trend[-1]),
+        "trend_slope_per_interval": float(slope),
+        "seasonal_min": float(seasonal.min()),
+        "seasonal_max": float(seasonal.max()),
+        "residual_std": float(residual.std()),
+        "reconstruction_max_error": float(np.max(np.abs(values - trend - seasonal - residual))),
+    }
 
 
 def _forecast_window(actual_days: Sequence, requested_days: int) -> tuple[pd.Timestamp, int]:
@@ -162,7 +209,7 @@ def build_stl_forecast(
         })
 
     if progress_callback:
-        progress_callback(45, "Combining available records and preparing rolling prediction...")
+        progress_callback(45, "Combining available records and preparing the forecast...")
 
     historical = (
         pd.concat(interval_frames, ignore_index=True)
@@ -177,29 +224,55 @@ def build_stl_forecast(
     if historical["interval_start"].dt.normalize().nunique() < 1:
         raise ValueError("At least one day of valid records is required for prediction.")
 
-    if progress_callback:
-        progress_callback(55, "Building recursive day, week, month, and year predictions...")
-
     actual_days = sorted(historical["interval_start"].dt.normalize().unique())
     start, forecast_days = _forecast_window(actual_days, forecast_days)
-    profiles = {
-        pd.Timestamp(day): _profile_for_day(historical, pd.Timestamp(day), intervals_per_day)
-        for day in actual_days
+    history_start = pd.Timestamp(actual_days[0])
+    history_end = pd.Timestamp(actual_days[-1]) + pd.Timedelta(days=1)
+    history_days = (history_end - history_start).days
+    history_index = pd.date_range(history_start, history_end, freq=f"{interval_minutes}min", inclusive="left")
+    call_series = historical.set_index("interval_start")["call_volume"].reindex(history_index, fill_value=0)
+    future_index = pd.date_range(start=start, periods=forecast_days * intervals_per_day, freq=f"{interval_minutes}min")
+    use_stl = history_days >= 14 and len(call_series) >= 2 * resolved_period
+    decomposition = {
+        "historical_intervals": int(len(call_series)),
+        "observed_intervals": int(len(historical)),
+        "zero_filled_intervals": int(len(call_series) - len(historical)),
+        "historical_span_days": int(history_days),
+        "prediction_start": start.isoformat(),
+        "seasonal_period": resolved_period,
+        "applied": use_stl,
     }
-    forecast_dates = [start + pd.Timedelta(days=offset) for offset in range(forecast_days)]
-    future_values: list[int] = []
-    for day in forecast_dates:
-        profile = _predict_day_profile(profiles, day)
-        profiles[day.normalize()] = profile
-        future_values.extend(profile.tolist())
-
+    if use_stl:
+        if progress_callback:
+            progress_callback(55, "Fitting robust STL trend, seasonal, and residual components...")
+        future_values, components = _stl_predict(
+            call_series, future_index, resolved_period, trend_lookback_days * intervals_per_day,
+        )
+        method = "STL"
+        logic = "Robust STL decomposition with recent linear trend extrapolation and repeating seasonal cycle."
+        decomposition.update(components)
+    else:
+        if progress_callback:
+            progress_callback(55, "Using rolling profiles because history is too short for STL...")
+        profiles = {
+            pd.Timestamp(day): _profile_for_day(historical, pd.Timestamp(day), intervals_per_day)
+            for day in actual_days
+        }
+        future_values = []
+        for day in pd.date_range(start=start, periods=forecast_days, freq="D"):
+            profile = _predict_day_profile(profiles, day)
+            profiles[day.normalize()] = profile
+            future_values.extend(profile.tolist())
+        method = "ROLLING_PROFILE"
+        logic = "Rolling-profile fallback for history under 14 days or fewer than two requested seasonal cycles."
+        decomposition["fallback_reason"] = (
+            "Historical date span is less than 14 days."
+            if history_days < 14 else "History contains fewer than two requested seasonal cycles."
+        )
+    decomposition["prediction_strategy"] = logic
     future = pd.DataFrame({
-        "interval_start": pd.date_range(
-            start=start,
-            periods=len(future_values),
-            freq=f"{interval_minutes}min",
-        ),
-        "call_volume": np.asarray(future_values, dtype=int),
+        "interval_start": future_index,
+        "call_volume": np.asarray(future_values, dtype=np.int64),
     })
 
     if progress_callback:
@@ -257,8 +330,8 @@ def build_stl_forecast(
     target_percent = clean_percent(target_service_level) * 100
     output_year = int(forecast["interval_start"].dt.year.iloc[0])
     summary = {
-        "method": "ROLLING_PROFILE",
-        "logic": "Expanding day profiles, then weekly, monthly, and prior-year same-period profiles with new records included.",
+        "method": method,
+        "logic": logic,
         "dataset_count": len(interval_frames),
         "historical_years": sorted(historical_years),
         "historical_days": int(len(actual_days)),
@@ -288,10 +361,6 @@ def build_stl_forecast(
             "historical_years": sorted(historical_years),
             "datasets": sorted(dataset_summary, key=lambda item: item["first_call"]),
         },
-        "decomposition_summary": {
-            "historical_intervals": int(len(historical)),
-            "prediction_start": start.isoformat(),
-            "prediction_strategy": "day-to-day, week-to-week, month-to-month, then year-to-year rolling profiles",
-        },
+        "decomposition_summary": decomposition,
     }
     return forecast, summary
