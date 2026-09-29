@@ -1,0 +1,11 @@
+name: New Environment
+values:
+  - key: baseUrl
+    value: ''
+  - key: forecastRows
+    value: ''
+  - key: forecastYear
+    value: ''
+  - key: jobId
+    value: ''
+color: 0
