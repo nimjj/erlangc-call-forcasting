@@ -3,9 +3,10 @@ from __future__ import annotations
 import time
 import uuid
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.config import STATIC_DIR
+from app.config import CORS_ALLOW_ORIGINS, STATIC_DIR
 from app.api.health import router as health_router
 from app.api.v1.router import router as v1_router
 from app.logger import logger
@@ -42,7 +43,17 @@ def create_app() -> FastAPI:
             logger.exception(f"[{request_id}] <-- {method} {path} | 500 FAILED | Time: {duration:.2f}ms | Error: {exc}")
             raise
 
-    application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    if CORS_ALLOW_ORIGINS:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=CORS_ALLOW_ORIGINS,
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+        )
+
+    # The bundled dashboard is optional; backend-only images ship without static/.
+    if STATIC_DIR.is_dir():
+        application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     application.include_router(health_router)
     application.include_router(v1_router)

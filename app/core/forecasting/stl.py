@@ -153,6 +153,7 @@ def build_stl_forecast(
     shrinkage: float = 30,
     max_agents: int = 1000,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    history_end: Optional[pd.Timestamp] = None,
 ) -> tuple[pd.DataFrame, dict]:
     if not file_paths:
         raise ValueError("Upload at least one CDR dataset with one or more days of valid records.")
@@ -188,6 +189,9 @@ def build_stl_forecast(
         raw_frame = read_cdr_csv(path)
         raw_count = len(raw_frame)
         clean = preprocess_cdr(path, raw_frame=raw_frame)
+        if history_end is not None:
+            # Backtests hold out records on/after the cutoff.
+            clean = clean.loc[clean["call_datetime"] < pd.Timestamp(history_end)]
         if clean.empty:
             raise ValueError(f"No valid Answered records found in {filename}.")
 

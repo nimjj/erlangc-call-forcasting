@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forecast Backtest</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #f4f6f8;
+            --card: #ffffff;
+            --text: #202124;
+            --muted: #5f6368;
+            --border: #dadce0;
+            --accent: #1a73e8;
+            --good: #188038;
+            --warn: #b06000;
+            --bad: #c5221f;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .container { width: min(1300px, 96%); margin: 24px auto; }
+        h1 { margin: 0 0 4px; font-size: 24px; }
+        h2 { margin: 0 0 12px; font-size: 17px; }
+        .subtitle { color: var(--muted); margin: 0 0 20px; }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 18px;
+            margin-bottom: 16px;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            align-items: end;
+        }
+
+        label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+        input, select, button { font: inherit; width: 100%; }
+        input, select { padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+
+        button {
+            padding: 10px 14px;
+            border: 0;
+            border-radius: 6px;
+            background: var(--accent);
+            color: #fff;
+            cursor: pointer;
+        }
+
+        button:disabled { opacity: 0.6; cursor: wait; }
+        .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+        .status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-top: 6px; }
+        .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+        .dot.ok { background: var(--good); }
+        .dot.down { background: var(--bad); }
+
+        .error {
+            display: none;
+            background: #fce8e6;
+            color: var(--bad);
+            border: 1px solid #f5c2bd;
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-top: 14px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: bold;
+            color: #fff;
+            background: var(--good);
+        }
+
+        .badge.fallback { background: var(--warn); }
+
+        .split {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .split div { font-size: 14px; }
+        .split span { display: block; color: var(--muted); font-size: 12px; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: right; }
+        th:first-child, td:first-child { text-align: left; }
+        th { background: #f8f9fa; font-weight: 600; }
+        td.better { color: var(--good); font-weight: bold; }
+
+        .chart-box { position: relative; height: 340px; }
+        .table-scroll { max-height: 420px; overflow: auto; }
+        #results { display: none; }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Forecast Backtest</h1>
+        <p class="subtitle">
+            Train on the records before the split date, forecast the rest, and compare against what actually happened.
+        </p>
+
+        <div class="card">
+            <div class="form-grid">
+                <div>
+                    <label for="apiBase">API base URL</label>
+                    <input id="apiBase" value="http://127.0.0.1:8000">
+                    <div class="status"><span id="healthDot" class="dot"></span><span id="healthText">Not checked</span></div>
+                </div>
+                <div>
+                    <label for="file">CDR dataset (.csv / .txt)</label>
+                    <input id="file" type="file" accept=".csv,.txt" multiple>
+                </div>
+                <div>
+                    <label for="trainEnd">Split date (first test day)</label>
+                    <input id="trainEnd" type="date" value="2026-08-15">
+                    <div class="hint">STL needs at least 14 days of training data.</div>
+                </div>
+                <div>
+                    <label for="interval">Interval</label>
+                    <select id="interval">
+                        <option value="15">15 minutes</option>
+                        <option value="30" selected>30 minutes</option>
+                        <option value="60">60 minutes</option>
+                    </select>
+                </div>
+                <div>
+                    <button id="runBtn">Run backtest</button>
+                </div>
+            </div>
+            <div id="error" class="error"></div>
+        </div>
+
+        <div id="results">
+            <div class="card">
+                <h2>Model <span id="methodBadge" class="badge"></span></h2>
+                <div id="fallbackNote" class="hint"></div>
+                <div id="split" class="split"></div>
+            </div>
+
+            <div class="card">
+                <h2>Accuracy (lower error is better)</h2>
+                <table>
+                    <thead>
+                        <tr><th>Metric</th><th>Forecast model</th><th>Seasonal-naive baseline</th></tr>
+                    </thead>
+                    <tbody id="metricsBody"></tbody>
+                </table>
+                <div class="hint">
+                    Baseline = repeat the last training week. Interval-level errors are noisy at low call volumes;
+                    the daily figures are the better guide.
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Daily calls: actual vs predicted</h2>
+                <div class="chart-box"><canvas id="dailyChart"></canvas></div>
+            </div>
+
+            <div class="card">
+                <h2>Calls per interval</h2>
+                <div class="chart-box"><canvas id="intervalChart"></canvas></div>
+            </div>
+
+            <div class="card">
+                <h2>Daily breakdown</h2>
+                <div class="table-scroll">
+                    <table>
+                        <thead>
+                            <tr><th>Date</th><th>Weekday</th><th>Actual</th><th>Predicted</th><th>Error</th><th>Baseline</th></tr>
+                        </thead>
+                        <tbody id="dailyBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const $ = (id) => document.getElementById(id);
+        const charts = {};
+        const COLORS = { actual: "#5f6368", predicted: "#1a73e8", baseline: "#e37400" };
+
+        const METRICS = [
+            ["daily_wape_percent", "Daily WAPE", "%"],
+            ["daily_mape_percent", "Daily MAPE", "%"],
+            ["bias_percent", "Total bias", "%"],
+            ["total_predicted_calls", "Predicted calls", ""],
+            ["total_actual_calls", "Actual calls", ""],
+            ["interval_mae", "Interval MAE (calls)", ""],
+            ["interval_rmse", "Interval RMSE (calls)", ""],
+            ["interval_wape_percent", "Interval WAPE", "%"],
+        ];
+        const LOWER_IS_BETTER = new Set(["daily_wape_percent", "daily_mape_percent", "interval_mae", "interval_rmse", "interval_wape_percent"]);
+
+        function apiBase() {
+            return $("apiBase").value.trim().replace(/\/+$/, "");
+        }
+
+        async function checkHealth() {
+            const dot = $("healthDot");
+            const text = $("healthText");
+            try {
+                const res = await fetch(`${apiBase()}/health`);
+                const body = await res.json();
+                dot.className = "dot ok";
+                text.textContent = `Connected (v${body.version})`;
+            } catch {
+                dot.className = "dot down";
+                text.textContent = "Backend unreachable";
+            }
+        }
+
+        function showError(message) {
+            $("error").textContent = message;
+            $("error").style.display = message ? "block" : "none";
+        }
+
+        function fmt(value, unit) {
+            if (value === null || value === undefined) return "—";
+            return `${value}${unit}`;
+        }
+
+        function renderSplit(data) {
+            const s = data.split;
+            const items = [
+                ["Training", `${s.train_start} → ${s.train_end}`],
+                ["Training span", `${s.train_span_days} days · ${s.train_calls} calls`],
+                ["Test", `${s.test_start} → ${s.test_end}`],
+                ["Test span", `${s.test_days} days · ${s.test_calls} calls`],
+            ];
+            $("split").innerHTML = items.map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join("");
+
+            const badge = $("methodBadge");
+            badge.textContent = data.forecast_method;
+            badge.className = data.forecast_method === "STL" ? "badge" : "badge fallback";
+            $("fallbackNote").textContent = data.fallback_reason
+                ? `STL was not applied: ${data.fallback_reason} Results reflect the rolling-profile fallback.`
+                : data.forecast_logic;
+        }
+
+        function renderMetrics(metrics) {
+            $("metricsBody").innerHTML = METRICS.map(([key, label, unit]) => {
+                const m = metrics.model[key];
+                const b = metrics.seasonal_naive[key];
+                let mClass = "", bClass = "";
+                if (m !== null && b !== null && m !== b) {
+                    const modelWins = LOWER_IS_BETTER.has(key) ? m < b
+                        : key === "bias_percent" ? Math.abs(m) < Math.abs(b) : false;
+                    const baselineWins = LOWER_IS_BETTER.has(key) ? b < m
+                        : key === "bias_percent" ? Math.abs(b) < Math.abs(m) : false;
+                    mClass = modelWins ? "better" : "";
+                    bClass = baselineWins ? "better" : "";
+                }
+                return `<tr><td>${label}</td><td class="${mClass}">${fmt(m, unit)}</td><td class="${bClass}">${fmt(b, unit)}</td></tr>`;
+            }).join("");
+        }
+
+        function drawChart(id, config) {
+            if (charts[id]) charts[id].destroy();
+            charts[id] = new Chart($(id), config);
+        }
+
+        function renderCharts(data) {
+            drawChart("dailyChart", {
+                data: {
+                    labels: data.daily.map((d) => `${d.date.slice(5)} ${d.weekday.slice(0, 3)}`),
+                    datasets: [
+                        { type: "bar", label: "Actual", data: data.daily.map((d) => d.actual), backgroundColor: "#bdc1c6" },
+                        { type: "line", label: "Predicted", data: data.daily.map((d) => d.predicted), borderColor: COLORS.predicted, backgroundColor: COLORS.predicted, tension: 0.2 },
+                        { type: "line", label: "Baseline", data: data.daily.map((d) => d.baseline), borderColor: COLORS.baseline, backgroundColor: COLORS.baseline, borderDash: [5, 4], tension: 0.2 },
+                    ],
+                },
+                options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false }, scales: { y: { beginAtZero: true } } },
+            });
+
+            drawChart("intervalChart", {
+                type: "line",
+                data: {
+                    labels: data.intervals.map((i) => i.interval_start.slice(5, 16).replace("T", " ")),
+                    datasets: [
+                        { label: "Actual", data: data.intervals.map((i) => i.actual), borderColor: COLORS.actual, pointRadius: 0, borderWidth: 1 },
+                        { label: "Predicted", data: data.intervals.map((i) => i.predicted), borderColor: COLORS.predicted, pointRadius: 0, borderWidth: 1.5 },
+                    ],
+                },
+                options: {
+                    maintainAspectRatio: false,
+                    interaction: { mode: "index", intersect: false },
+                    scales: { x: { ticks: { maxTicksLimit: 18 } }, y: { beginAtZero: true } },
+                },
+            });
+        }
+
+        function renderDailyTable(daily) {
+            $("dailyBody").innerHTML = daily.map((d) => {
+                const err = d.predicted - d.actual;
+                return `<tr><td>${d.date}</td><td>${d.weekday}</td><td>${d.actual}</td><td>${d.predicted}</td>`
+                    + `<td>${err > 0 ? "+" : ""}${err}</td><td>${d.baseline}</td></tr>`;
+            }).join("");
+        }
+
+        async function runBacktest() {
+            showError("");
+            const files = $("file").files;
+            if (!files.length) {
+                showError("Choose a CDR dataset first.");
+                return;
+            }
+            const form = new FormData();
+            for (const file of files) form.append("files", file);
+            if ($("trainEnd").value) form.append("train_end", $("trainEnd").value);
+            form.append("interval_minutes", $("interval").value);
+
+            const btn = $("runBtn");
+            btn.disabled = true;
+            btn.textContent = "Running…";
+            try {
+                const res = await fetch(`${apiBase()}/api/v1/cdr/backtest`, { method: "POST", body: form });
+                const body = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(body.detail || `Request failed with status ${res.status}`);
+                renderSplit(body);
+                renderMetrics(body.metrics);
+                renderCharts(body);
+                renderDailyTable(body.daily);
+                $("results").style.display = "block";
+            } catch (err) {
+                showError(err instanceof TypeError
+                    ? `Could not reach ${apiBase()}. Is the container running, and is this page served from an allowed origin (http://localhost:5500)?`
+                    : err.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "Run backtest";
+            }
+        }
+
+        $("runBtn").addEventListener("click", runBacktest);
+        $("apiBase").addEventListener("change", checkHealth);
+        checkHealth();
+    </script>
+</body>
+
+</html>

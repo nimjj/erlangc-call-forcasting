@@ -24,3 +24,5 @@ logs/
 tests/
 docs/
 postman/
+
+testdata/

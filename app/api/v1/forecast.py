@@ -13,6 +13,7 @@ from app.config import (
 )
 from app.core.forecasting.stl import build_stl_forecast
 from app.core.forecasting.aggregates import build_dashboard_aggregates
+from app.core.forecasting.backtest import run_backtest
 from app.workers.task_manager import task_manager
 from app.workers.jobs import run_stl_forecast_worker
 
@@ -181,3 +182,55 @@ async def stl_forecast_async(
         if temp_dir_path.exists():
             shutil.rmtree(temp_dir_path, ignore_errors=True)
         raise
+
+@router.post("/backtest", summary="Backtest the forecast against held-out data", description="Train on records before train_end, forecast the remaining days, and score predictions against actual call volumes and a seasonal-naive baseline.")
+async def backtest(
+    files: Annotated[list[UploadFile], File(description="One or more CDR CSV files covering both the training and test periods")],
+    train_end: Annotated[str | None, Form(description="First held-out date (YYYY-MM-DD). Defaults to 14 days after the first record, the minimum for STL to apply.")] = None,
+    interval_minutes: Annotated[int, Form()] = 30,
+    seasonal_period: Annotated[int | None, Form()] = None,
+    trend_lookback_days: Annotated[int, Form()] = 90,
+    target_seconds: Annotated[float, Form()] = 20,
+    target_service_level: Annotated[float, Form()] = 80,
+    shrinkage: Annotated[float, Form()] = 30,
+    max_agents: Annotated[int, Form()] = 1000,
+) -> dict:
+    if not files:
+        raise HTTPException(status_code=400, detail="Upload at least one CDR dataset.")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=400, detail=f"Upload no more than {MAX_UPLOAD_FILES} files at a time.")
+    if max_agents < 1 or max_agents > MAX_AGENT_COUNT:
+        raise HTTPException(status_code=400, detail=f"max_agents must be between 1 and {MAX_AGENT_COUNT}.")
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths: list[Path] = []
+            filenames: list[str] = []
+            for index, upload in enumerate(files, start=1):
+                filename = upload.filename or f"dataset_{index}.csv"
+                suffix = Path(filename).suffix or ".csv"
+                if suffix.lower() not in {".csv", ".txt"}:
+                    raise HTTPException(status_code=400, detail=f"Unsupported file type for {filename}.")
+                path = Path(temp_dir) / f"dataset_{index}{suffix}"
+                await _save_upload(upload, path)
+                paths.append(path)
+                filenames.append(filename)
+
+            return run_backtest(
+                file_paths=paths,
+                filenames=filenames,
+                train_end=train_end or None,
+                interval_minutes=interval_minutes,
+                seasonal_period=seasonal_period,
+                trend_lookback_days=trend_lookback_days,
+                target_seconds=target_seconds,
+                target_service_level=target_service_level,
+                shrinkage=shrinkage,
+                max_agents=max_agents,
+            )
+    except HTTPException:
+        raise
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Backtest failed: {exc}") from exc

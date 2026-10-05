@@ -12,3 +12,6 @@ logs
 .idea
 postman
 docs
+static
+backtest-ui
+testdata

@@ -10,7 +10,6 @@ COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY static ./static
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/logs \
