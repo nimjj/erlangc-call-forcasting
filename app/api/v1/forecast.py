@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from app.config import (
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_FILES,
@@ -69,39 +70,43 @@ async def stl_forecast(
                 paths.append(path)
                 filenames.append(filename)
 
-            forecast, summary = build_stl_forecast(
-                file_paths=paths,
-                filenames=filenames,
-                interval_minutes=interval_minutes,
-                forecast_days=forecast_days,
-                seasonal_period=seasonal_period,
-                trend_lookback_days=trend_lookback_days,
-                target_seconds=target_seconds,
-                target_service_level=target_service_level,
-                shrinkage=shrinkage,
-                max_agents=max_agents,
-            )
-            response = {
-                **summary,
-                "parameters": {
-                    "interval_minutes": interval_minutes,
-                    "forecast_days": summary["days"],
-                    "seasonal_period": summary["seasonal_period"],
-                    "trend_lookback_days": trend_lookback_days,
-                    "target_seconds": target_seconds,
-                    "target_service_level_percent": target_service_level,
-                    "shrinkage_percent": shrinkage,
-                    "max_agents": max_agents,
-                },
-                "charts": build_dashboard_aggregates(forecast),
-            }
-            if include_forecast_rows:
-                serializable = forecast.copy()
-                serializable["interval_start"] = serializable["interval_start"].dt.strftime("%Y-%m-%dT%H:%M:%S")
-                response["forecast"] = serializable.to_dict(orient="records")
-            else:
-                response["forecast"] = []
-            return response
+            def compute() -> dict:
+                forecast, summary = build_stl_forecast(
+                    file_paths=paths,
+                    filenames=filenames,
+                    interval_minutes=interval_minutes,
+                    forecast_days=forecast_days,
+                    seasonal_period=seasonal_period,
+                    trend_lookback_days=trend_lookback_days,
+                    target_seconds=target_seconds,
+                    target_service_level=target_service_level,
+                    shrinkage=shrinkage,
+                    max_agents=max_agents,
+                )
+                response = {
+                    **summary,
+                    "parameters": {
+                        "interval_minutes": interval_minutes,
+                        "forecast_days": summary["days"],
+                        "seasonal_period": summary["seasonal_period"],
+                        "trend_lookback_days": trend_lookback_days,
+                        "target_seconds": target_seconds,
+                        "target_service_level_percent": target_service_level,
+                        "shrinkage_percent": shrinkage,
+                        "max_agents": max_agents,
+                    },
+                    "charts": build_dashboard_aggregates(forecast),
+                }
+                if include_forecast_rows:
+                    serializable = forecast.copy()
+                    serializable["interval_start"] = serializable["interval_start"].dt.strftime("%Y-%m-%dT%H:%M:%S")
+                    response["forecast"] = serializable.to_dict(orient="records")
+                else:
+                    response["forecast"] = []
+                return response
+
+            # CPU-bound; run off the event loop so other requests (and health checks) stay responsive.
+            return await run_in_threadpool(compute)
     except HTTPException:
         raise
     except (ValueError, RuntimeError) as exc:
@@ -216,7 +221,8 @@ async def backtest(
                 paths.append(path)
                 filenames.append(filename)
 
-            return run_backtest(
+            return await run_in_threadpool(
+                run_backtest,
                 file_paths=paths,
                 filenames=filenames,
                 train_end=train_end or None,

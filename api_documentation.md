@@ -1,6 +1,6 @@
 # API Documentation — CDR STL Forecast & Agent Scheduling API
 
-**Version:** `4.1.0`
+**Version:** `4.2.0`
 
 **Default base URL:** `http://127.0.0.1:8000`
 
@@ -18,6 +18,7 @@ Interactive documentation:
 | `GET` | `/health` | — | Return health and version |
 | `POST` | `/api/v1/cdr/stl-forecast` | `multipart/form-data` | Forecast calls using STL (rolling fallback for short history) and calculate Erlang C staffing |
 | `POST` | `/api/v1/cdr/stl-forecast/async` | `multipart/form-data` | Submit background forecast job |
+| `POST` | `/api/v1/cdr/backtest` | `multipart/form-data` | Train before a split date, forecast the held-out days, and score accuracy |
 | `GET` | `/api/v1/jobs/{job_id}` | JSON response | Read job progress and completed result |
 | `GET` | `/api/v1/jobs/{job_id}/stream` | `text/event-stream` response | Stream job progress |
 | `POST` | `/api/v1/schedule/monthly` | `application/json` | Generate monthly agent roster |
@@ -26,7 +27,9 @@ Interactive documentation:
 
 ## GET `/`
 
-If `static/index.html` exists, the API returns that dashboard file.
+If `static/index.html` exists, the API returns that dashboard file. This is the case when you run the app locally with Uvicorn.
+
+The Docker image is backend-only and does not contain `static/`, so in the container `/` always returns the fallback below and `/static/...` returns 404.
 
 Otherwise the fallback response is service information similar to:
 
@@ -46,7 +49,7 @@ Otherwise the fallback response is service information similar to:
 ```json
 {
   "status": "healthy",
-  "version": "4.1.0"
+  "version": "4.2.0"
 }
 ```
 
@@ -395,6 +398,148 @@ Statuses are `queued`, `processing`, `completed`, or `failed`. Progress ranges f
 # GET `/api/v1/jobs/{job_id}/stream`
 
 Streams server-sent events as `text/event-stream` when progress or status changes. Each `data:` JSON object contains `job_id`, `status`, `progress`, `message`, `error`, and `has_result`. The stream closes after `completed` or `failed`. Fetch the polling endpoint to retrieve the completed forecast; the stream does not contain the full result. Unknown job IDs return HTTP 404.
+
+---
+
+# POST `/api/v1/cdr/backtest`
+
+Measures forecast accuracy on held-out data. Records before `train_end` are used for training, and the forecast for the remaining days is compared with the calls that actually arrived and with a simple baseline. The standalone page in `backtest-ui/` calls this endpoint; see the README section "Testing with the backtest page".
+
+The request is synchronous. It returns the full result in one response and runs on a worker thread, so other requests stay responsive while it computes.
+
+## Content type
+
+```text
+multipart/form-data
+```
+
+## Form fields
+
+| Field | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `files` | repeated file | — | yes | 1-10 non-empty `.csv`/`.txt` files, 25 MiB maximum each, covering both the training and test periods. Same format and cleaning as `/api/v1/cdr/stl-forecast`. |
+| `train_end` | date (`YYYY-MM-DD`) | first record date + 14 days | no | First held-out day. Records before it are training data; records from it onward are test data. |
+| `interval_minutes` | integer | `30` | no | Must divide 1440 |
+| `seasonal_period` | integer | one week of intervals | no | Same meaning as in the forecast endpoint |
+| `trend_lookback_days` | integer | `90` | no | At least 7; limited to the available training history |
+| `target_seconds` | number | `20` | no | Passed to the staffing calculation |
+| `target_service_level` | number | `80` | no | Passed to the staffing calculation |
+| `shrinkage` | number | `30` | no | Passed to the staffing calculation |
+| `max_agents` | integer | `1000` | no | 1-10,000 |
+
+## Split rules
+
+- Both sides of the split must contain valid answered calls. Otherwise the response is HTTP 400: `Split date ... must fall inside the data range ... with records on both sides.`
+- The training period must span at least 7 days, or the response is HTTP 400.
+- STL needs at least 14 training days and two seasonal cycles. With less, the forecast uses the rolling-profile fallback: `forecast_method` is `ROLLING_PROFILE` and `fallback_reason` explains why.
+- The forecast starts the day after the last training day that has calls and runs to the last day in the data. Only intervals on or after `train_end` are scored.
+- The forecast horizon is always the exact held-out span. The automatic horizon rule of the forecast endpoint does not apply.
+
+## Baseline and metrics
+
+The **seasonal-naive baseline** repeats the last 7 days of training data, interval for interval. It uses no test data. A useful forecast should beat it.
+
+`metrics.model` scores the forecast and `metrics.seasonal_naive` scores the baseline, using the same fields:
+
+| Field | Meaning |
+|---|---|
+| `interval_mae` | Mean absolute error in calls per interval |
+| `interval_rmse` | Root-mean-square error in calls per interval |
+| `interval_wape_percent` | Σ\|predicted − actual\| ÷ Σ actual across intervals. Very high at low volumes. |
+| `total_actual_calls`, `total_predicted_calls` | Calls over the test period |
+| `bias_percent` | (predicted − actual) ÷ actual. Positive means over-forecasting. |
+| `daily_mape_percent` | Mean absolute % error of daily totals, skipping days with zero actual calls |
+| `daily_wape_percent` | Σ\|daily error\| ÷ Σ daily actual. The best single accuracy figure. |
+
+Percentage fields are `null` when the actual total is zero.
+
+## Example cURL
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/cdr/backtest \
+  -F "files=@calls_2026-08.csv" \
+  -F "train_end=2026-08-15" \
+  -F "interval_minutes=30"
+```
+
+## Response structure
+
+The `daily` and `intervals` arrays below are shortened:
+
+```json
+{
+  "split": {
+    "data_start": "2026-08-01",
+    "data_end": "2026-08-31",
+    "train_start": "2026-08-01",
+    "train_end": "2026-08-14",
+    "train_span_days": 14,
+    "train_calls": 443,
+    "test_start": "2026-08-15",
+    "test_end": "2026-08-31",
+    "test_days": 17,
+    "test_calls": 447
+  },
+  "forecast_method": "STL",
+  "forecast_logic": "Robust STL decomposition with recent linear trend extrapolation and repeating seasonal cycle.",
+  "fallback_reason": null,
+  "decomposition_summary": {
+    "historical_intervals": 672,
+    "historical_span_days": 14,
+    "prediction_start": "2026-08-15T00:00:00",
+    "seasonal_period": 336,
+    "applied": true,
+    "...": "same fields as the forecast endpoint's decomposition_summary"
+  },
+  "interval_minutes": 30,
+  "metrics": {
+    "model": {
+      "interval_mae": 0.551,
+      "interval_rmse": 1.214,
+      "interval_wape_percent": 100.67,
+      "total_actual_calls": 447,
+      "total_predicted_calls": 553,
+      "bias_percent": 23.71,
+      "daily_mape_percent": 29.36,
+      "daily_wape_percent": 31.77
+    },
+    "seasonal_naive": {
+      "interval_mae": 0.561,
+      "interval_rmse": 1.25,
+      "interval_wape_percent": 102.46,
+      "total_actual_calls": 447,
+      "total_predicted_calls": 561,
+      "bias_percent": 25.5,
+      "daily_mape_percent": 29.52,
+      "daily_wape_percent": 31.77
+    }
+  },
+  "daily": [
+    { "date": "2026-08-15", "weekday": "Saturday", "actual": 9, "predicted": 8, "baseline": 8 }
+  ],
+  "intervals": [
+    { "interval_start": "2026-08-15T08:30:00", "actual": 0, "predicted": 1, "baseline": 1 }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `split` | Data range, training and test ranges, day spans, and call counts |
+| `forecast_method` | `STL` or `ROLLING_PROFILE` |
+| `fallback_reason` | Why STL was not applied, or `null` |
+| `decomposition_summary` | Same structure as in the forecast response |
+| `metrics` | Accuracy for the forecast (`model`) and the baseline (`seasonal_naive`) |
+| `daily` | Daily totals of actual, predicted, and baseline calls for each test day |
+| `intervals` | Actual, predicted, and baseline calls for each scored interval |
+
+Errors follow the same rules as the forecast endpoint: HTTP 400 for data and split problems, 413 for oversized files, and 500 prefixed with `Backtest failed:`.
+
+---
+
+# Cross-origin (CORS) access
+
+Browser pages served from another origin, such as the backtest page on `http://localhost:5500`, can call the API only when their origin is listed in the `CORS_ALLOW_ORIGINS` environment variable (comma-separated). When the variable is unset, the API sends no CORS headers. [compose.yaml](compose.yaml) defaults it to `http://localhost:5500,http://127.0.0.1:5500`. Allowed methods are `GET` and `POST`. Non-browser clients such as cURL are not affected.
 
 ---
 

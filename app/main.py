@@ -18,7 +18,7 @@ def create_app() -> FastAPI:
             "Contact-centre demand forecasting using STL with short-history rolling profiles, Erlang C staffing, "
             "and monthly scheduling with three configurable 8-hour shifts."
         ),
-        version="4.1.0",
+        version="4.2.0",
     )
 
     @application.middleware("http")

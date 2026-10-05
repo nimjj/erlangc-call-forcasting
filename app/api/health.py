@@ -18,4 +18,4 @@ def dashboard():
 
 @router.get("/health")
 def health() -> dict:
-    return {"status": "healthy", "version": "4.1.0"}
+    return {"status": "healthy", "version": "4.2.0"}

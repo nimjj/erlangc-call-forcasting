@@ -4,30 +4,130 @@ FastAPI application for forecasting contact-centre call demand from historical C
 
 Forecasts use robust seasonal-trend decomposition with LOESS (STL) when the historical date span is at least 14 days and contains two seasonal cycles. Shorter histories use rolling profiles. Responses identify the actual method as `STL` or `ROLLING_PROFILE`; the dashboard completion message shows the method and any fallback reason.
 
-**Application version:** `4.1.0`
+**Application version:** `4.2.0`
 
-**Local dashboard:** `http://127.0.0.1:8000/`
+The application is **dockerized as a backend-only REST API**. The container serves the API alone; it does not include a browser frontend. Two browser pages ship in the repository for use outside the container:
 
-The browser submits a background forecast job, displays progress and charts, builds monthly schedules, displays daily scheduled-agent counts, and supports yearly CSV downloads. [API documentation](api_documentation.md) contains endpoint examples and response details.
+| Page | Location | Purpose |
+|---|---|---|
+| Dashboard | [static/index.html](static/index.html) | Full forecasting and scheduling UI. Served at `/` only when you run the app locally with Uvicorn (not in Docker). |
+| Backtest page | [backtest-ui/index.html](backtest-ui/index.html) | Standalone page that checks forecast accuracy against held-out data. Talks to the API (local or containerized) over REST. See [Testing with the backtest page](#testing-with-the-backtest-page). |
+
+[API documentation](api_documentation.md) contains endpoint examples and response details.
+
+## How it works
+
+```text
+                     CDR files (.csv / .txt, 1-10 files, <= 25 MiB each)
+                                         |
+          +------------------------------+------------------------------+
+          |                              |                              |
+ POST /api/v1/cdr/stl-forecast   POST .../stl-forecast/async    POST /api/v1/cdr/backtest
+   (synchronous result)          (job_id -> poll /jobs/{id})    (train_end split date)
+          |                              |                              |
+          +------------------------------+--------------+---------------+
+                                         |              |
+                                         v              | backtest only: keep records
+           1. Read     read_cdr_csv           reader.py | before train_end for training,
+              detect encoding/separator, map headers    | hold out the rest as "actuals"
+                                         |              |
+                                         v              |
+           2. Clean    preprocess_cdr         cleaner.py
+              answered calls only, parse dates and talk time,
+              keep durations from 1 s to 4 h
+                                         |
+                                         v
+           3. Bucket   build_cdr_intervals    interval.py
+              call volume and handle time per 15/30/60-minute interval
+                                         |
+                                         v
+           4. Choose method                              stl.py
+              history >= 14 days AND >= 2 seasonal cycles (1 week = 336 x 30-min)?
+                     |                                  |
+                    yes                                 no
+                     v                                  v
+           Robust STL decomposition            Rolling-profile fallback
+           trend + weekly seasonal + residual  average of matching past days
+           (linear trend extrapolation,        (same weekday / month position)
+            repeating seasonal cycle)
+                     |                                  |
+                     +----------------+-----------------+
+                                      v
+           5. Average handling time per time-of-day slot (from history)
+                                      |
+                                      v
+           6. Erlang C staffing   queuing/erlang_c.py, staffing.py
+              agents needed per interval for the target service level, plus shrinkage
+                                      |
+            +-------------------------+--------------------------+
+            v                                                    v
+   Forecast response (JSON)                         Backtest scoring    backtest.py
+   summary, charts, per-interval rows               predicted vs actual held-out calls
+            |                                       and vs a seasonal-naive baseline
+            v                                       (repeat last training week):
+   POST /api/v1/schedule/monthly                    MAE, RMSE, WAPE, MAPE, bias
+   roster.py, shifts.py: 3 x 8-hour shifts,
+   daily agent counts, rest rules
+```
 
 ## Run with Docker
 
-Docker Compose builds and runs the application as one container. Docker Desktop (or Docker Engine with the Compose plugin) is required.
+Docker Compose builds and runs the API as one container. Docker Desktop (or Docker Engine with the Compose plugin) is required.
 
 ```powershell
-docker compose up --build
+docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8000/`; the health endpoint is `http://127.0.0.1:8000/health`. To use another local port, set `APP_PORT` before starting Compose:
+Check it with `http://127.0.0.1:8000/health`. Interactive API docs are at `http://127.0.0.1:8000/docs`. Opening `/` returns a short JSON service message, because the container has no dashboard.
+
+To use another local port, set `APP_PORT` before starting Compose:
 
 ```powershell
 $env:APP_PORT = "8080"
-docker compose up --build
+docker compose up --build -d
 ```
 
-The service listens only on the local machine by default. Application logs persist in the `app-logs` Docker volume; uploaded files are temporary and are removed when processing finishes. View logs with `docker compose logs -f app`, and stop the container with `docker compose down`.
+View logs with `docker compose logs -f app`, and stop the container with `docker compose down`.
+
+### What's inside the container
+
+| Item | Details |
+|---|---|
+| Base image | `python:3.12-slim` |
+| Application code | `app/` only. `static/`, `backtest-ui/`, `testdata/`, docs, and Postman files are excluded by [.dockerignore](.dockerignore). |
+| Dependencies | Exact versions pinned in [requirements.txt](requirements.txt), so every build produces the same forecasts. |
+| Process | `uvicorn app.main:app` with one worker on port 8000, published only on `127.0.0.1` by default |
+| User | Non-root `appuser` (UID 10001) |
+| Filesystem | Read-only root filesystem. Uploads go to a 512 MiB `/tmp` tmpfs and are deleted after processing. Logs persist in the `app-logs` volume at `/app/logs`. |
+| Hardening | All Linux capabilities dropped, `no-new-privileges` |
+| Health check | Docker polls `/health` every 30 seconds |
+
+| Environment variable | Default (in [compose.yaml](compose.yaml)) | Purpose |
+|---|---|---|
+| `APP_PORT` | `8000` | Host port mapped to the container |
+| `CORS_ALLOW_ORIGINS` | `http://localhost:5500,http://127.0.0.1:5500` | Comma-separated browser origins allowed to call the API. The default allows the backtest page. Set it to your frontend's origin in production, or to an empty value to disable cross-origin browser access. |
 
 This deployment intentionally runs one Uvicorn worker because background jobs and results are held in process memory. Do not scale this service to multiple containers or workers until job state is moved to shared durable storage. For remote access, place it behind an authenticated HTTPS reverse proxy; the application itself does not provide authentication.
+
+## Testing with the backtest page
+
+The backtest page checks forecast accuracy. It trains the model on the records before a split date, forecasts the remaining days, and compares the forecast with what actually happened.
+
+1. Start the API: `docker compose up --build -d`
+2. Serve the page from the repository root: `python -m http.server 5500 --directory backtest-ui`
+3. Open `http://localhost:5500`. The status next to the API URL turns green when the API is reachable.
+4. Choose a CDR file, set the **split date** (the first held-out day), and select **Run backtest**.
+
+Serve the page as shown rather than opening the HTML file directly. A file opened from disk has a `null` origin, which CORS rejects.
+
+Reading the results:
+
+- **Method badge:** `STL` means true STL ran. `ROLLING_PROFILE` means the training period was shorter than 14 days, so the fallback ran instead.
+- **Forecast vs baseline:** the baseline repeats the last training week. If the forecast doesn't beat it, the history is too short for STL to add value.
+- **Daily WAPE / MAPE:** the most useful accuracy figures. Interval-level errors look very large at low call volumes, because being off by one call in a half hour is a 100% miss.
+- **Total bias:** positive means over-forecasting, which leads to overstaffing.
+
+The training period must cover at least 7 days, and at least 14 days for STL to apply. The page calls `POST /api/v1/cdr/backtest`; see the [API documentation](api_documentation.md#post-apiv1cdrbacktest).
 
 ## Quick start
 
@@ -55,36 +155,40 @@ Run commands from the repository root. The compatibility entry point `python -m 
 
 | URL | Purpose |
 |---|---|
-| `/` | Dashboard |
+| `/` | Dashboard when run locally (JSON service message in Docker or when `static/` is absent) |
 | `/health` | Health and application version |
 | `/docs` | Swagger UI |
 | `/redoc` | ReDoc |
 | `/openapi.json` | Generated OpenAPI schema |
 
-The dashboard loads Chart.js from jsDelivr. The application creates `static/` and `logs/` when needed and requires write access for logs and temporary uploads.
+The dashboard loads Chart.js from jsDelivr. The application creates `logs/` when needed and requires write access for logs and temporary uploads. `/static` is mounted only when the `static/` directory exists.
 
 ## Project structure
 
 ```text
 Calculator-Erlang-C/
 |-- api.py                         # Compatibility entry point
-|-- app/
-|   |-- main.py                    # App setup, routers, static files, request logging
-|   |-- config.py                  # Paths and application limits
+|-- app/                           # Everything the Docker image contains
+|   |-- main.py                    # App setup, routers, CORS, optional static files, request logging
+|   |-- config.py                  # Paths, application limits, CORS_ALLOW_ORIGINS
 |   |-- logger.py                  # Console and daily rotating file logs
 |   |-- api/
 |   |   |-- health.py              # Dashboard and health routes
-|   |   `-- v1/                    # Forecast, schedule, and job routes
+|   |   `-- v1/                    # Forecast, backtest, schedule, and job routes
 |   |-- schemas/                   # Pydantic models; routes define actual responses
 |   |-- core/
 |   |   |-- constants.py           # CDR fields, forecast fields, shift definitions
 |   |   |-- ingestion/             # CDR parsing, cleaning, interval construction
-|   |   |-- forecasting/           # STL/fallback forecasts and dashboard aggregates
+|   |   |-- forecasting/           # STL/fallback forecasts, backtest scoring, dashboard aggregates
 |   |   |-- queuing/               # Erlang C calculations and staffing cache
-|   |   `-- scheduling/           # Monthly rosters, shift times, and rest constraints
+|   |   `-- scheduling/            # Monthly rosters, shift times, and rest constraints
 |   `-- workers/                   # In-memory jobs and background forecast worker
-|-- static/index.html              # Dashboard, filters, and CSV generation
-|-- requirements.txt
+|-- static/index.html              # Local dashboard, filters, and CSV generation (not in the image)
+|-- backtest-ui/index.html         # Standalone backtest page served outside the container
+|-- Dockerfile                     # Backend-only image
+|-- compose.yaml                   # Container runtime settings, port, CORS origins, log volume
+|-- .dockerignore
+|-- requirements.txt               # Pinned dependency versions
 |-- api_documentation.md
 ```
 
@@ -260,9 +364,10 @@ Summary service level, occupancy, and ASA are arithmetic means over forecast int
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/` | Serve the dashboard, or service information if the HTML is absent |
-| `GET` | `/health` | Return `{"status":"healthy","version":"4.1.0"}` |
+| `GET` | `/health` | Return `{"status":"healthy","version":"4.2.0"}` |
 | `POST` | `/api/v1/cdr/stl-forecast` | Return the complete forecast synchronously |
 | `POST` | `/api/v1/cdr/stl-forecast/async` | Save uploads and submit a background forecast job |
+| `POST` | `/api/v1/cdr/backtest` | Train before a split date, forecast the held-out days, and score accuracy |
 | `GET` | `/api/v1/jobs/{job_id}` | Return progress, status, error, and completed result |
 | `GET` | `/api/v1/jobs/{job_id}/stream` | Stream progress as server-sent events |
 | `POST` | `/api/v1/schedule/monthly` | Generate a monthly roster from JSON forecast rows |
@@ -353,7 +458,7 @@ Both exports are built in the browser as UTF-8 CSV with BOM and CRLF row endings
 
 ## Configuration, state, and logging
 
-[app/config.py](app/config.py) defines the current limits; these values are Python constants, not environment-variable settings.
+[app/config.py](app/config.py) defines the current limits as Python constants. The only environment-variable setting is `CORS_ALLOW_ORIGINS`, a comma-separated list of browser origins allowed to call the API. It is unset (CORS disabled) unless you set it, and [compose.yaml](compose.yaml) sets it for the backtest page; see [What's inside the container](#whats-inside-the-container).
 
 | Constant | Value | Scope |
 |---|---|---|

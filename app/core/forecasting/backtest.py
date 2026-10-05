@@ -72,10 +72,13 @@ def run_backtest(
 
     first_day = clean["call_datetime"].min().normalize()
     last_day = clean["call_datetime"].max().normalize()
-    cutoff = (
-        pd.Timestamp(train_end).normalize() if train_end
-        else first_day + pd.Timedelta(days=DEFAULT_TRAIN_DAYS)
-    )
+    if train_end:
+        try:
+            cutoff = pd.Timestamp(train_end).normalize()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"train_end must be a date in YYYY-MM-DD format; got {train_end!r}.") from exc
+    else:
+        cutoff = first_day + pd.Timedelta(days=DEFAULT_TRAIN_DAYS)
     train = clean.loc[clean["call_datetime"] < cutoff]
     test = clean.loc[clean["call_datetime"] >= cutoff]
     if train.empty or test.empty:

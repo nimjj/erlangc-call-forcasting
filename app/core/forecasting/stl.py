@@ -121,11 +121,15 @@ def _stl_predict(
     }
 
 
-def _forecast_window(actual_days: Sequence, requested_days: int) -> tuple[pd.Timestamp, int]:
+def _forecast_window(
+    actual_days: Sequence, requested_days: int, explicit: bool = False,
+) -> tuple[pd.Timestamp, int]:
     first = pd.Timestamp(min(actual_days)).normalize()
     last = pd.Timestamp(max(actual_days)).normalize()
     next_day = last + pd.Timedelta(days=1)
     history_days = (next_day - first).days
+    if explicit:
+        return next_day, requested_days
     if history_days < 7:
         return next_day, 1
     # Non-default API horizons remain explicit overrides.
@@ -229,7 +233,8 @@ def build_stl_forecast(
         raise ValueError("At least one day of valid records is required for prediction.")
 
     actual_days = sorted(historical["interval_start"].dt.normalize().unique())
-    start, forecast_days = _forecast_window(actual_days, forecast_days)
+    # Backtests set history_end and need the exact held-out horizon, even when it is 365 days.
+    start, forecast_days = _forecast_window(actual_days, forecast_days, explicit=history_end is not None)
     history_start = pd.Timestamp(actual_days[0])
     history_end = pd.Timestamp(actual_days[-1]) + pd.Timedelta(days=1)
     history_days = (history_end - history_start).days
