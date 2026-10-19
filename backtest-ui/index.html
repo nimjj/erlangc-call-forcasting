@@ -117,7 +117,7 @@
     <div class="container">
         <h1>Forecast Backtest</h1>
         <p class="subtitle">
-            Train on the records before the split date, forecast the rest, and compare against what actually happened.
+            Train on the records before the split date, forecast the rest, and compare against what actually happened. <a href="drilldown.html">Drill down by month, week and day</a>.
         </p>
 
         <div class="card">
@@ -145,6 +145,13 @@
                     </select>
                 </div>
                 <div>
+                    <label for="annual">Annual seasonality</label>
+                    <select id="annual">
+                        <option value="auto" selected>Auto (needs 365+ training days)</option>
+                        <option value="off">Off (weekly STL only)</option>
+                    </select>
+                </div>
+                <div>
                     <button id="runBtn">Run backtest</button>
                 </div>
             </div>
@@ -162,13 +169,14 @@
                 <h2>Accuracy (lower error is better)</h2>
                 <table>
                     <thead>
-                        <tr><th>Metric</th><th>Forecast model</th><th>Seasonal-naive baseline</th></tr>
+                        <tr id="metricsHead"><th>Metric</th><th>Forecast model</th><th>Weekly naive</th></tr>
                     </thead>
                     <tbody id="metricsBody"></tbody>
                 </table>
                 <div class="hint">
-                    Baseline = repeat the last training week. Interval-level errors are noisy at low call volumes;
-                    the daily figures are the better guide.
+                    Weekly naive = repeat the last training week. Yearly naive (shown with 371+ training days) = same
+                    weekday 52 weeks earlier, scaled by the year-over-year ratio. Interval-level errors are noisy at low
+                    call volumes; the daily figures are the better guide.
                 </div>
             </div>
 
@@ -187,7 +195,7 @@
                 <div class="table-scroll">
                     <table>
                         <thead>
-                            <tr><th>Date</th><th>Weekday</th><th>Actual</th><th>Predicted</th><th>Error</th><th>Baseline</th></tr>
+                            <tr id="dailyHead"><th>Date</th><th>Weekday</th><th>Actual</th><th>Predicted</th><th>Error</th><th>Weekly naive</th></tr>
                         </thead>
                         <tbody id="dailyBody"></tbody>
                     </table>
@@ -199,7 +207,8 @@
     <script>
         const $ = (id) => document.getElementById(id);
         const charts = {};
-        const COLORS = { actual: "#5f6368", predicted: "#1a73e8", baseline: "#e37400" };
+        const COLORS = { actual: "#5f6368", predicted: "#1a73e8", baseline: "#e37400", yearly: "#188038" };
+        const COLUMNS = [["model", "Forecast model"], ["seasonal_naive", "Weekly naive"], ["seasonal_naive_yearly", "Yearly naive"]];
 
         const METRICS = [
             ["daily_wape_percent", "Daily WAPE", "%"],
@@ -260,19 +269,19 @@
         }
 
         function renderMetrics(metrics) {
+            const columns = COLUMNS.filter(([name]) => metrics[name]);
+            $("metricsHead").innerHTML = "<th>Metric</th>" + columns.map(([, label]) => `<th>${label}</th>`).join("");
             $("metricsBody").innerHTML = METRICS.map(([key, label, unit]) => {
-                const m = metrics.model[key];
-                const b = metrics.seasonal_naive[key];
-                let mClass = "", bClass = "";
-                if (m !== null && b !== null && m !== b) {
-                    const modelWins = LOWER_IS_BETTER.has(key) ? m < b
-                        : key === "bias_percent" ? Math.abs(m) < Math.abs(b) : false;
-                    const baselineWins = LOWER_IS_BETTER.has(key) ? b < m
-                        : key === "bias_percent" ? Math.abs(b) < Math.abs(m) : false;
-                    mClass = modelWins ? "better" : "";
-                    bClass = baselineWins ? "better" : "";
-                }
-                return `<tr><td>${label}</td><td class="${mClass}">${fmt(m, unit)}</td><td class="${bClass}">${fmt(b, unit)}</td></tr>`;
+                const values = columns.map(([name]) => metrics[name][key]);
+                const score = (v) => key === "bias_percent" ? Math.abs(v) : v;
+                const ranked = LOWER_IS_BETTER.has(key) || key === "bias_percent";
+                const valid = values.filter((v) => v !== null && v !== undefined).map(score);
+                const best = ranked && valid.length > 1 && new Set(valid).size > 1 ? Math.min(...valid) : null;
+                const cells = values.map((v) => {
+                    const cls = best !== null && v !== null && v !== undefined && score(v) === best ? "better" : "";
+                    return `<td class="${cls}">${fmt(v, unit)}</td>`;
+                }).join("");
+                return `<tr><td>${label}</td>${cells}</tr>`;
             }).join("");
         }
 
@@ -288,7 +297,8 @@
                     datasets: [
                         { type: "bar", label: "Actual", data: data.daily.map((d) => d.actual), backgroundColor: "#bdc1c6" },
                         { type: "line", label: "Predicted", data: data.daily.map((d) => d.predicted), borderColor: COLORS.predicted, backgroundColor: COLORS.predicted, tension: 0.2 },
-                        { type: "line", label: "Baseline", data: data.daily.map((d) => d.baseline), borderColor: COLORS.baseline, backgroundColor: COLORS.baseline, borderDash: [5, 4], tension: 0.2 },
+                        { type: "line", label: "Weekly naive", data: data.daily.map((d) => d.baseline), borderColor: COLORS.baseline, backgroundColor: COLORS.baseline, borderDash: [5, 4], tension: 0.2 },
+                        ...(data.metrics.seasonal_naive_yearly ? [{ type: "line", label: "Yearly naive", data: data.daily.map((d) => d.baseline_yearly), borderColor: COLORS.yearly, backgroundColor: COLORS.yearly, borderDash: [2, 3], tension: 0.2 }] : []),
                     ],
                 },
                 options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false }, scales: { y: { beginAtZero: true } } },
@@ -312,10 +322,14 @@
         }
 
         function renderDailyTable(daily) {
+            const yearly = daily.length && daily[0].baseline_yearly !== undefined;
+            $("dailyHead").innerHTML = "<th>Date</th><th>Weekday</th><th>Actual</th><th>Predicted</th><th>Error</th><th>Weekly naive</th>"
+                + (yearly ? "<th>Yearly naive</th>" : "");
             $("dailyBody").innerHTML = daily.map((d) => {
                 const err = d.predicted - d.actual;
                 return `<tr><td>${d.date}</td><td>${d.weekday}</td><td>${d.actual}</td><td>${d.predicted}</td>`
-                    + `<td>${err > 0 ? "+" : ""}${err}</td><td>${d.baseline}</td></tr>`;
+                    + `<td>${err > 0 ? "+" : ""}${err}</td><td>${d.baseline}</td>`
+                    + (yearly ? `<td>${d.baseline_yearly}</td>` : "") + "</tr>";
             }).join("");
         }
 
@@ -330,6 +344,7 @@
             for (const file of files) form.append("files", file);
             if ($("trainEnd").value) form.append("train_end", $("trainEnd").value);
             form.append("interval_minutes", $("interval").value);
+            form.append("annual_seasonality", $("annual").value);
 
             const btn = $("runBtn");
             btn.disabled = true;

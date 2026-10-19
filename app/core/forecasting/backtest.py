@@ -13,6 +13,8 @@ from app.core.ingestion.reader import read_cdr_csv
 
 DEFAULT_TRAIN_DAYS = 14
 MIN_TRAIN_DAYS = 7
+YEARLY_LAG_DAYS = 364
+YOY_WINDOW_DAYS = 91
 
 
 def _accuracy(actual: pd.Series, predicted: pd.Series, dates: pd.Series) -> dict:
@@ -55,6 +57,7 @@ def run_backtest(
     target_service_level: float = 80,
     shrinkage: float = 30,
     max_agents: int = 1000,
+    annual_seasonality: str = "auto",
 ) -> dict:
     """Hold out records from train_end onward, forecast them from the earlier history, and score the result."""
     if not file_paths:
@@ -110,6 +113,7 @@ def run_backtest(
         shrinkage=shrinkage,
         max_agents=max_agents,
         history_end=cutoff,
+        annual_seasonality=annual_seasonality,
     )
 
     rule = f"{interval_minutes}min"
@@ -130,7 +134,29 @@ def run_backtest(
     offsets = ((scored["interval_start"] - forecast_start) / pd.Timedelta(rule)).astype(int)
     scored["baseline"] = last_week[offsets % len(last_week)]
 
-    daily = scored.groupby("date", as_index=False)[["actual", "predicted", "baseline"]].sum()
+    baselines = ["baseline"]
+    metrics = {
+        "model": _accuracy(scored["actual"], scored["predicted"], scored["date"]),
+        "seasonal_naive": _accuracy(scored["actual"], scored["baseline"], scored["date"]),
+    }
+    # Yearly seasonal-naive: same weekday 52 weeks earlier (from training data only),
+    # scaled by the year-over-year ratio of the last 13 training weeks.
+    if train_span_days >= YEARLY_LAG_DAYS + 7:
+        lag = pd.Timedelta(days=YEARLY_LAG_DAYS)
+        window = pd.Timedelta(days=YOY_WINDOW_DAYS)
+        recent = actual.loc[(actual.index >= forecast_start - window) & (actual.index < forecast_start)].sum()
+        prior = actual.loc[(actual.index >= forecast_start - window - lag) & (actual.index < forecast_start - lag)].sum()
+        ratio = float(np.clip(recent / prior, 0.5, 2.0)) if prior > 0 else 1.0
+        years_back = np.ceil(((scored["interval_start"] - forecast_start) / lag).clip(lower=0) + 1e-9).astype(int).clip(lower=1)
+        source = scored["interval_start"] - years_back * lag
+        scored["baseline_yearly"] = np.rint(
+            actual.reindex(source, fill_value=0).to_numpy() * ratio ** years_back.to_numpy()
+        ).astype(int)
+        baselines.append("baseline_yearly")
+        metrics["seasonal_naive_yearly"] = _accuracy(scored["actual"], scored["baseline_yearly"], scored["date"])
+        metrics["seasonal_naive_yearly"]["yoy_ratio"] = round(ratio, 4)
+
+    daily = scored.groupby("date", as_index=False)[["actual", "predicted", *baselines]].sum()
     decomposition = summary["decomposition_summary"]
     return {
         "split": {
@@ -150,27 +176,25 @@ def run_backtest(
         "fallback_reason": decomposition.get("fallback_reason"),
         "decomposition_summary": decomposition,
         "interval_minutes": interval_minutes,
-        "metrics": {
-            "model": _accuracy(scored["actual"], scored["predicted"], scored["date"]),
-            "seasonal_naive": _accuracy(scored["actual"], scored["baseline"], scored["date"]),
-        },
+        "annual_seasonality": annual_seasonality,
+        "metrics": metrics,
         "daily": [
             {
-                "date": row.date,
-                "weekday": pd.Timestamp(row.date).day_name(),
-                "actual": int(row.actual),
-                "predicted": int(row.predicted),
-                "baseline": int(row.baseline),
+                "date": row["date"],
+                "weekday": pd.Timestamp(row["date"]).day_name(),
+                "actual": int(row["actual"]),
+                "predicted": int(row["predicted"]),
+                **{name: int(row[name]) for name in baselines},
             }
-            for row in daily.itertuples(index=False)
+            for row in daily.to_dict(orient="records")
         ],
         "intervals": [
             {
-                "interval_start": row.interval_start.strftime("%Y-%m-%dT%H:%M:%S"),
-                "actual": int(row.actual),
-                "predicted": int(row.predicted),
-                "baseline": int(row.baseline),
+                "interval_start": row["interval_start"].strftime("%Y-%m-%dT%H:%M:%S"),
+                "actual": int(row["actual"]),
+                "predicted": int(row["predicted"]),
+                **{name: int(row[name]) for name in baselines},
             }
-            for row in scored.itertuples(index=False)
+            for row in scored.to_dict(orient="records")
         ],
     }

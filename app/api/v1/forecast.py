@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -41,6 +41,7 @@ async def stl_forecast(
     forecast_days: Annotated[int, Form(description="365 selects automatic duration: 1-6 historical days -> next day; 7-27 -> next 7 days; 28 days to under 12 months -> next calendar month; 12+ months -> next calendar year. Other values override, except histories under 7 days always predict one day.")] = 365,
     seasonal_period: Annotated[int | None, Form(description="STL cycle length in intervals; omitted or zero defaults to one week. At least 2. Fewer than two cycles uses rolling-profile fallback.")] = None,
     trend_lookback_days: Annotated[int, Form(description="Recent days of the STL trend used for linear extrapolation; at least 7, limited to available history. Not used by rolling-profile fallback.")] = 90,
+    annual_seasonality: Annotated[Literal["auto", "off"], Form(description="auto uses the daily model with annual seasonality and US holidays when history spans at least 365 days; off keeps the interval-level weekly STL.")] = "auto",
     target_seconds: Annotated[float, Form()] = 20,
     target_service_level: Annotated[float, Form()] = 80,
     shrinkage: Annotated[float, Form()] = 30,
@@ -78,6 +79,7 @@ async def stl_forecast(
                     forecast_days=forecast_days,
                     seasonal_period=seasonal_period,
                     trend_lookback_days=trend_lookback_days,
+                    annual_seasonality=annual_seasonality,
                     target_seconds=target_seconds,
                     target_service_level=target_service_level,
                     shrinkage=shrinkage,
@@ -90,6 +92,7 @@ async def stl_forecast(
                         "forecast_days": summary["days"],
                         "seasonal_period": summary["seasonal_period"],
                         "trend_lookback_days": trend_lookback_days,
+                        "annual_seasonality": annual_seasonality,
                         "target_seconds": target_seconds,
                         "target_service_level_percent": target_service_level,
                         "shrinkage_percent": shrinkage,
@@ -121,6 +124,7 @@ async def stl_forecast_async(
     forecast_days: Annotated[int, Form(description="365 selects automatic duration: 1-6 historical days -> next day; 7-27 -> next 7 days; 28 days to under 12 months -> next calendar month; 12+ months -> next calendar year. Other values override, except histories under 7 days always predict one day.")] = 365,
     seasonal_period: Annotated[int | None, Form(description="STL cycle length in intervals; omitted or zero defaults to one week. At least 2. Fewer than two cycles uses rolling-profile fallback.")] = None,
     trend_lookback_days: Annotated[int, Form(description="Recent days of the STL trend used for linear extrapolation; at least 7, limited to available history. Not used by rolling-profile fallback.")] = 90,
+    annual_seasonality: Annotated[Literal["auto", "off"], Form(description="auto uses the daily model with annual seasonality and US holidays when history spans at least 365 days; off keeps the interval-level weekly STL.")] = "auto",
     target_seconds: Annotated[float, Form()] = 20,
     target_service_level: Annotated[float, Form()] = 80,
     shrinkage: Annotated[float, Form()] = 30,
@@ -167,6 +171,7 @@ async def stl_forecast_async(
             forecast_days=forecast_days,
             seasonal_period=seasonal_period,
             trend_lookback_days=trend_lookback_days,
+            annual_seasonality=annual_seasonality,
             target_seconds=target_seconds,
             target_service_level=target_service_level,
             shrinkage=shrinkage,
@@ -188,13 +193,14 @@ async def stl_forecast_async(
             shutil.rmtree(temp_dir_path, ignore_errors=True)
         raise
 
-@router.post("/backtest", summary="Backtest the forecast against held-out data", description="Train on records before train_end, forecast the remaining days, and score predictions against actual call volumes and a seasonal-naive baseline.")
+@router.post("/backtest", summary="Backtest the forecast against held-out data", description="Train on records before train_end, forecast the remaining days, and score predictions against actual call volumes, a weekly seasonal-naive baseline, and (with a year of training history) a yearly seasonal-naive baseline.")
 async def backtest(
     files: Annotated[list[UploadFile], File(description="One or more CDR CSV files covering both the training and test periods")],
     train_end: Annotated[str | None, Form(description="First held-out date (YYYY-MM-DD). Defaults to 14 days after the first record, the minimum for STL to apply.")] = None,
     interval_minutes: Annotated[int, Form()] = 30,
     seasonal_period: Annotated[int | None, Form()] = None,
     trend_lookback_days: Annotated[int, Form()] = 90,
+    annual_seasonality: Annotated[Literal["auto", "off"], Form(description="auto uses the daily model with annual seasonality and US holidays when history spans at least 365 days; off keeps the interval-level weekly STL.")] = "auto",
     target_seconds: Annotated[float, Form()] = 20,
     target_service_level: Annotated[float, Form()] = 80,
     shrinkage: Annotated[float, Form()] = 30,
@@ -229,6 +235,7 @@ async def backtest(
                 interval_minutes=interval_minutes,
                 seasonal_period=seasonal_period,
                 trend_lookback_days=trend_lookback_days,
+                annual_seasonality=annual_seasonality,
                 target_seconds=target_seconds,
                 target_service_level=target_service_level,
                 shrinkage=shrinkage,

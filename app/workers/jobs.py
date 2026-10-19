@@ -23,6 +23,7 @@ def run_stl_forecast_worker(
     max_agents: int,
     include_forecast_rows: bool,
     temp_dir: Path | None = None,
+    annual_seasonality: str = "auto",
 ) -> dict:
     logger.info(f"[Job {job_id}] Worker started for {len(file_paths)} file(s): {filenames}")
 
@@ -43,6 +44,7 @@ def run_stl_forecast_worker(
             forecast_days=forecast_days,
             seasonal_period=seasonal_period,
             trend_lookback_days=trend_lookback_days,
+            annual_seasonality=annual_seasonality,
             target_seconds=target_seconds,
             target_service_level=target_service_level,
             shrinkage=shrinkage,
@@ -58,6 +60,7 @@ def run_stl_forecast_worker(
                 "forecast_days": summary["days"],
                 "seasonal_period": summary["seasonal_period"],
                 "trend_lookback_days": trend_lookback_days,
+                "annual_seasonality": annual_seasonality,
                 "target_seconds": target_seconds,
                 "target_service_level_percent": target_service_level,
                 "shrinkage_percent": shrinkage,

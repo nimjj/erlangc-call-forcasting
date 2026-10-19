@@ -8,6 +8,7 @@ import pandas as pd
 from statsmodels.tsa.seasonal import STL
 
 from app.core.constants import FORECAST_COLUMNS
+from app.core.forecasting.annual import MIN_ANNUAL_HISTORY_DAYS, predict_annual
 from app.core.ingestion.reader import read_cdr_csv
 from app.core.ingestion.cleaner import preprocess_cdr, clean_percent
 from app.core.ingestion.interval import build_cdr_intervals
@@ -158,6 +159,7 @@ def build_stl_forecast(
     max_agents: int = 1000,
     progress_callback: Optional[Callable[[int, str], None]] = None,
     history_end: Optional[pd.Timestamp] = None,
+    annual_seasonality: str = "auto",
 ) -> tuple[pd.DataFrame, dict]:
     if not file_paths:
         raise ValueError("Upload at least one CDR dataset with one or more days of valid records.")
@@ -173,6 +175,9 @@ def build_stl_forecast(
         raise ValueError("forecast_days must be greater than 0.")
     if trend_lookback_days < 7:
         raise ValueError("trend_lookback_days must be at least 7.")
+    annual_seasonality = str(annual_seasonality).strip().casefold()
+    if annual_seasonality not in {"auto", "off"}:
+        raise ValueError("annual_seasonality must be 'auto' or 'off'.")
 
     intervals_per_day = 1440 // interval_minutes
     resolved_period = int(seasonal_period or intervals_per_day * 7)
@@ -242,6 +247,7 @@ def build_stl_forecast(
     call_series = historical.set_index("interval_start")["call_volume"].reindex(history_index, fill_value=0)
     future_index = pd.date_range(start=start, periods=forecast_days * intervals_per_day, freq=f"{interval_minutes}min")
     use_stl = history_days >= 14 and len(call_series) >= 2 * resolved_period
+    use_annual = use_stl and annual_seasonality == "auto" and history_days >= MIN_ANNUAL_HISTORY_DAYS
     decomposition = {
         "historical_intervals": int(len(call_series)),
         "observed_intervals": int(len(historical)),
@@ -250,8 +256,26 @@ def build_stl_forecast(
         "prediction_start": start.isoformat(),
         "seasonal_period": resolved_period,
         "applied": use_stl,
+        "annual_seasonality": use_annual,
     }
-    if use_stl:
+    if not use_annual:
+        decomposition["annual_seasonality_reason"] = (
+            "Disabled by annual_seasonality=off." if annual_seasonality == "off"
+            else f"History spans {history_days} days; annual seasonality needs at least {MIN_ANNUAL_HISTORY_DAYS}."
+        )
+    if use_annual:
+        if progress_callback:
+            progress_callback(55, "Fitting daily STL with annual seasonality and US holiday effects...")
+        future_values, components = predict_annual(
+            call_series, future_index, intervals_per_day, trend_lookback_days,
+        )
+        method = "STL"
+        logic = (
+            "Daily robust STL (weekly) with annual Fourier seasonality, US holiday multipliers, "
+            "damped recent trend, and weekday intraday profiles."
+        )
+        decomposition.update(components)
+    elif use_stl:
         if progress_callback:
             progress_callback(55, "Fitting robust STL trend, seasonal, and residual components...")
         future_values, components = _stl_predict(
@@ -260,6 +284,7 @@ def build_stl_forecast(
         method = "STL"
         logic = "Robust STL decomposition with recent linear trend extrapolation and repeating seasonal cycle."
         decomposition.update(components)
+        decomposition["model_variant"] = "interval_stl_weekly"
     else:
         if progress_callback:
             progress_callback(55, "Using rolling profiles because history is too short for STL...")

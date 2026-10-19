@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forecast Drill-down</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #f4f6f8;
+            --card: #ffffff;
+            --text: #202124;
+            --muted: #5f6368;
+            --border: #dadce0;
+            --accent: #1a73e8;
+            --good: #188038;
+            --bad: #c5221f;
+            --actual: #202124;
+            --predicted: #1a73e8;
+            --old: #d93025;
+        }
+
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+        .container { width: min(1300px, 96%); margin: 24px auto; }
+        h1 { margin: 0 0 4px; font-size: 24px; }
+        .subtitle { color: var(--muted); margin: 0 0 20px; }
+        .subtitle a { color: var(--accent); }
+
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; align-items: end; }
+        label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+        input, select, button { font: inherit; width: 100%; }
+        input, select { padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+        input[type="checkbox"] { width: auto; margin-right: 6px; }
+        .check { display: flex; align-items: center; font-size: 13px; color: var(--text); margin: 0; }
+        button { padding: 10px 14px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; }
+        button:disabled { opacity: 0.6; cursor: wait; }
+        .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+        .status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-top: 6px; }
+        .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+        .dot.ok { background: var(--good); }
+        .dot.down { background: var(--bad); }
+
+        .error { display: none; background: #fce8e6; color: var(--bad); border: 1px solid #f5c2bd; border-radius: 6px; padding: 10px 12px; margin-top: 14px; }
+        #results { display: none; }
+
+        .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 15px; margin-bottom: 4px; }
+        .crumbs button { width: auto; padding: 4px 10px; background: #e8f0fe; color: var(--accent); font-size: 14px; }
+        .crumbs button.current { background: transparent; color: var(--text); font-weight: bold; cursor: default; }
+        .crumbs .sep { color: var(--muted); }
+        .method { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+        .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0 4px; }
+        .tile { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+        .tile span { display: block; font-size: 12px; color: var(--muted); }
+        .tile b { font-size: 20px; }
+        .tile small { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+        .chart-box { position: relative; height: 330px; }
+        .chart-box.small { height: 150px; margin-top: 6px; }
+        .legend-note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+        .legend-note i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 10px; vertical-align: middle; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: right; }
+        th:first-child, td:first-child { text-align: left; }
+        th { background: #f8f9fa; font-weight: 600; position: sticky; top: 0; }
+        tr.row-drill { cursor: pointer; }
+        tr.row-drill:hover td { background: #f1f6fe; }
+        tr.worst td:first-child::after { content: " largest miss"; font-size: 11px; color: var(--bad); margin-left: 6px; }
+        .table-scroll { max-height: 440px; overflow: auto; }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Forecast Drill-down</h1>
+        <p class="subtitle">
+            Predicted vs actual calls, from the whole test period down to one half-hour. Click a point, bar or table row to zoom in.
+            <a href="index.html">Summary page</a>
+        </p>
+
+        <div class="card">
+            <div class="form-grid">
+                <div>
+                    <label for="apiBase">API base URL</label>
+                    <input id="apiBase" value="http://127.0.0.1:8000">
+                    <div class="status"><span id="healthDot" class="dot"></span><span id="healthText">Not checked</span></div>
+                </div>
+                <div>
+                    <label for="file">CDR dataset (.csv / .txt)</label>
+                    <input id="file" type="file" accept=".csv,.txt" multiple>
+                </div>
+                <div>
+                    <label for="trainEnd">Split date (first test day)</label>
+                    <input id="trainEnd" type="date" value="2025-10-01">
+                    <div class="hint">Everything before it trains the forecast; this day onward is scored.</div>
+                </div>
+                <div>
+                    <label for="interval">Interval</label>
+                    <select id="interval">
+                        <option value="15">15 minutes</option>
+                        <option value="30" selected>30 minutes</option>
+                        <option value="60">60 minutes</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="annual">Annual seasonality</label>
+                    <select id="annual">
+                        <option value="auto" selected>Auto (needs 365+ training days)</option>
+                        <option value="off">Off (weekly STL only)</option>
+                    </select>
+                    <label class="check" style="margin-top:8px"><input id="compare" type="checkbox">Also draw the old method (Off)</label>
+                </div>
+                <div>
+                    <button id="runBtn">Run backtest</button>
+                </div>
+            </div>
+            <div id="error" class="error"></div>
+        </div>
+
+        <div id="results">
+            <div class="card">
+                <div class="crumbs" id="crumbs"></div>
+                <div class="tiles" id="tiles"></div>
+            </div>
+
+            <div class="card">
+                <div class="chart-box"><canvas id="mainChart"></canvas></div>
+                <div class="chart-box small"><canvas id="errChart"></canvas></div>
+                <div class="legend-note">
+                    Lower chart = predicted minus actual for each point.
+                    <i style="background:#1a73e8"></i>above zero: predicted too many
+                    <i style="background:#d93025"></i>below zero: predicted too few
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="table-scroll">
+                    <table>
+                        <thead><tr id="tHead"></tr></thead>
+                        <tbody id="tBody"></tbody>
+                    </table>
+                </div>
+                <div class="hint" id="tableNote"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const $ = (id) => document.getElementById(id);
+        const charts = {};
+        Chart.defaults.animation = false;
+        const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const OVER = "#1a73e8";
+        const UNDER = "#d93025";
+
+        // state.days: [{date, weekday, actual, predicted, off}], state.slots: Map date -> [{t, actual, predicted, off}]
+        const state = { days: [], slots: new Map(), hasOff: false, mainLabel: "Predicted", meta: null };
+        const path = { month: null, week: null, day: null };
+        let current = { items: [], level: "month" };
+
+        const apiBase = () => $("apiBase").value.trim().replace(/\/+$/, "");
+        const utc = (d) => { const [y, m, dd] = d.split("-").map(Number); return new Date(Date.UTC(y, m - 1, dd)); };
+        const iso = (dt) => dt.toISOString().slice(0, 10);
+        const weekStart = (d) => { const dt = utc(d); dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7)); return iso(dt); };
+        const shortDate = (d) => { const dt = utc(d); return `${DAYS[dt.getUTCDay()]} ${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]}`; };
+        const rangeDate = (d) => { const dt = utc(d); return `${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]}`; };
+        const monthLabel = (m) => `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+        const signed = (n) => `${n > 0 ? "+" : ""}${n.toLocaleString()}`;
+        const pct = (num, den) => (den > 0 ? (100 * num) / den : null);
+        const fmtPct = (v, sign = true) => (v === null ? "—" : `${sign && v > 0 ? "+" : ""}${v.toFixed(1)}%`);
+
+        async function checkHealth() {
+            try {
+                const res = await fetch(`${apiBase()}/health`);
+                const body = await res.json();
+                $("healthDot").className = "dot ok";
+                $("healthText").textContent = `Connected (v${body.version})`;
+            } catch {
+                $("healthDot").className = "dot down";
+                $("healthText").textContent = "Backend unreachable";
+            }
+        }
+
+        function showError(message) {
+            $("error").textContent = message;
+            $("error").style.display = message ? "block" : "none";
+        }
+
+        async function callBacktest(mode) {
+            const form = new FormData();
+            for (const file of $("file").files) form.append("files", file);
+            if ($("trainEnd").value) form.append("train_end", $("trainEnd").value);
+            form.append("interval_minutes", $("interval").value);
+            form.append("annual_seasonality", mode);
+            const res = await fetch(`${apiBase()}/api/v1/cdr/backtest`, { method: "POST", body: form });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body.detail || `Request failed with status ${res.status}`);
+            return body;
+        }
+
+        function load(main, old) {
+            const offDaily = new Map(old ? old.daily.map((d) => [d.date, d.predicted]) : []);
+            const offSlot = new Map(old ? old.intervals.map((i) => [i.interval_start, i.predicted]) : []);
+            state.hasOff = Boolean(old);
+            state.days = main.daily.map((d) => ({
+                date: d.date, weekday: d.weekday, actual: d.actual, predicted: d.predicted, off: offDaily.get(d.date) ?? null,
+            }));
+            state.slots = new Map();
+            for (const i of main.intervals) {
+                const date = i.interval_start.slice(0, 10);
+                if (!state.slots.has(date)) state.slots.set(date, []);
+                state.slots.get(date).push({
+                    t: i.interval_start.slice(11, 16), actual: i.actual, predicted: i.predicted, off: offSlot.get(i.interval_start) ?? null,
+                });
+            }
+            state.mainLabel = old ? `Predicted (${$("annual").value})` : "Predicted";
+            state.meta = main;
+            path.month = path.week = path.day = null;
+        }
+
+        // ---- build the items shown at the current level ----
+        function aggregate(key, label, days, drill) {
+            const actual = days.reduce((s, d) => s + d.actual, 0);
+            const predicted = days.reduce((s, d) => s + d.predicted, 0);
+            const off = state.hasOff ? days.reduce((s, d) => s + d.off, 0) : null;
+            const absErr = days.reduce((s, d) => s + Math.abs(d.predicted - d.actual), 0);
+            return { key, label, actual, predicted, off, wape: pct(absErr, actual), drill, days: days.length };
+        }
+
+        function buildItems() {
+            if (path.day) {
+                const slots = state.slots.get(path.day) || [];
+                const live = slots.map((s, i) => (s.actual || s.predicted ? i : -1)).filter((i) => i >= 0);
+                const from = live.length ? Math.max(0, live[0] - 1) : 0;
+                const to = live.length ? Math.min(slots.length - 1, live[live.length - 1] + 1) : slots.length - 1;
+                return { level: "interval", items: slots.slice(from, to + 1).map((s) => ({ key: s.t, label: s.t, actual: s.actual, predicted: s.predicted, off: s.off, wape: null, drill: false })) };
+            }
+            if (path.week) {
+                const days = state.days.filter((d) => d.date.slice(0, 7) === path.month && weekStart(d.date) === path.week);
+                return { level: "day", items: days.map((d) => {
+                    const slots = state.slots.get(d.date) || [];
+                    const absErr = slots.reduce((s, x) => s + Math.abs(x.predicted - x.actual), 0);
+                    return { key: d.date, label: shortDate(d.date), actual: d.actual, predicted: d.predicted, off: d.off, wape: pct(absErr, d.actual), drill: true };
+                }) };
+            }
+            if (path.month) {
+                const groups = new Map();
+                for (const d of state.days.filter((x) => x.date.slice(0, 7) === path.month)) {
+                    const w = weekStart(d.date);
+                    if (!groups.has(w)) groups.set(w, []);
+                    groups.get(w).push(d);
+                }
+                return { level: "week", items: [...groups].map(([w, days]) =>
+                    aggregate(w, `${rangeDate(days[0].date)} – ${rangeDate(days[days.length - 1].date)}`, days, true)) };
+            }
+            const groups = new Map();
+            for (const d of state.days) {
+                const m = d.date.slice(0, 7);
+                if (!groups.has(m)) groups.set(m, []);
+                groups.get(m).push(d);
+            }
+            return { level: "month", items: [...groups].map(([m, days]) => aggregate(m, monthLabel(m), days, true)) };
+        }
+
+        // ---- navigation ----
+        function drill(index) {
+            const item = current.items[index];
+            if (!item || !item.drill) return;
+            if (current.level === "month") path.month = item.key;
+            else if (current.level === "week") path.week = item.key;
+            else if (current.level === "day") path.day = item.key;
+            render();
+        }
+
+        function goTo(level) {
+            if (level === "all") path.month = path.week = path.day = null;
+            if (level === "month") path.week = path.day = null;
+            if (level === "week") path.day = null;
+            render();
+        }
+
+        function renderCrumbs() {
+            const parts = [["all", "All months"]];
+            if (path.month) parts.push(["month", monthLabel(path.month)]);
+            if (path.week) {
+                const days = state.days.filter((d) => d.date.slice(0, 7) === path.month && weekStart(d.date) === path.week);
+                parts.push(["week", `Week ${rangeDate(days[0].date)} – ${rangeDate(days[days.length - 1].date)}`]);
+            }
+            if (path.day) parts.push(["day", shortDate(path.day)]);
+            $("crumbs").innerHTML = parts.map(([level, text], i) => {
+                const last = i === parts.length - 1;
+                return `${i ? '<span class="sep">›</span>' : ""}<button class="${last ? "current" : ""}" data-level="${level}" ${last ? "disabled" : ""}>${text}</button>`;
+            }).join("") + `<span class="method">${state.meta.forecast_method} · ${state.meta.decomposition_summary.model_variant || ""} · train ${state.meta.split.train_span_days} days</span>`;
+            $("crumbs").querySelectorAll("button[data-level]").forEach((b) => b.addEventListener("click", () => goTo(b.dataset.level)));
+        }
+
+        // ---- rendering ----
+        function renderTiles(level, items) {
+            const actual = items.reduce((s, i) => s + i.actual, 0);
+            const predicted = items.reduce((s, i) => s + i.predicted, 0);
+            const bias = pct(predicted - actual, actual);
+            const absErr = items.reduce((s, i) => s + Math.abs(i.predicted - i.actual), 0);
+            const over = items.filter((i) => i.predicted > i.actual).length;
+            const under = items.filter((i) => i.predicted < i.actual).length;
+            const noun = { month: "months", week: "weeks", day: "days", interval: "intervals" }[level];
+            const errLabel = { month: "Month-by-month error", week: "Week-by-week error", day: "Day-by-day error", interval: "Interval-by-interval error" }[level];
+            const tiles = [
+                ["Actual calls", actual.toLocaleString(), ""],
+                ["Predicted calls", predicted.toLocaleString(), state.hasOff ? `old method: ${items.reduce((s, i) => s + (i.off ?? 0), 0).toLocaleString()}` : ""],
+                ["Net bias", fmtPct(bias), bias === null ? "" : bias > 0 ? "predicted too many overall" : bias < 0 ? "predicted too few overall" : ""],
+                [errLabel, fmtPct(pct(absErr, actual), false), "total miss, ignoring direction"],
+                [`${noun[0].toUpperCase() + noun.slice(1)} over / under`, `${over} / ${under}`, `${items.length - over - under} exact`],
+            ];
+            $("tiles").innerHTML = tiles.map(([k, v, s]) => `<div class="tile"><span>${k}</span><b>${v}</b><small>${s}</small></div>`).join("");
+        }
+
+        function drawChart(id, config) {
+            if (charts[id]) charts[id].destroy();
+            charts[id] = new Chart($(id), config);
+        }
+
+        function renderCharts(level, items) {
+            const labels = items.map((i) => i.label);
+            const isInterval = level === "interval";
+            const clickable = level !== "interval";
+            const datasets = [
+                { label: "Actual", data: items.map((i) => i.actual), borderColor: "#202124", backgroundColor: "#202124", borderWidth: 2, pointRadius: isInterval ? 0 : 3, tension: 0.15, stepped: isInterval ? "middle" : false },
+                { label: state.mainLabel, data: items.map((i) => i.predicted), borderColor: "#1a73e8", backgroundColor: "#1a73e8", borderWidth: 2, pointRadius: isInterval ? 0 : 3, tension: 0.15, stepped: isInterval ? "middle" : false },
+            ];
+            if (state.hasOff) {
+                datasets.push({ label: "Old method (off)", data: items.map((i) => i.off), borderColor: "#d93025", backgroundColor: "#d93025", borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, tension: 0.15, stepped: isInterval ? "middle" : false });
+            }
+            const onClick = (evt, _els, chart) => {
+                const hit = chart.getElementsAtEventForMode(evt.native, "index", { intersect: false }, false);
+                if (hit.length) drill(hit[0].index);
+            };
+            const onHover = (evt, els) => { evt.native.target.style.cursor = clickable && els.length ? "pointer" : "default"; };
+            const axisX = { ticks: { maxTicksLimit: 16, autoSkip: true } };
+            // Fixed y-axis width keeps the two charts' x-axes lined up.
+            const fixWidth = { afterFit: (scale) => { scale.width = 64; } };
+
+            drawChart("mainChart", {
+                type: "line",
+                data: { labels, datasets },
+                options: {
+                    maintainAspectRatio: false, onClick, onHover,
+                    interaction: { mode: "index", intersect: false },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                footer: (ctx) => {
+                                    const it = items[ctx[0].dataIndex];
+                                    const err = it.predicted - it.actual;
+                                    return `Error: ${signed(err)} (${fmtPct(pct(err, it.actual))})`;
+                                },
+                            },
+                        },
+                    },
+                    scales: { x: axisX, y: { beginAtZero: true, title: { display: true, text: "Calls" }, ...fixWidth } },
+                },
+            });
+
+            drawChart("errChart", {
+                type: "bar",
+                data: {
+                    labels,
+                    datasets: [{ label: "Predicted − actual", data: items.map((i) => i.predicted - i.actual), backgroundColor: items.map((i) => (i.predicted >= i.actual ? OVER : UNDER)) }],
+                },
+                options: {
+                    maintainAspectRatio: false, onClick, onHover,
+                    plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => `Error: ${signed(c.parsed.y)}` } } },
+                    scales: { x: axisX, y: { title: { display: true, text: "Error (calls)" }, ...fixWidth } },
+                },
+            });
+        }
+
+        function renderTable(level, items) {
+            const labels = { month: "Month", week: "Week", day: "Day", interval: "Time" }[level];
+            const wapeLabel = { month: "Daily error", week: "Daily error", day: "Interval error", interval: "" }[level];
+            $("tHead").innerHTML = `<th>${labels}</th><th>Actual</th><th>Predicted</th>`
+                + (state.hasOff ? "<th>Old method</th>" : "")
+                + `<th>Error</th><th>Error %</th>` + (wapeLabel ? `<th>${wapeLabel}</th>` : "");
+            const worstIndex = items.reduce((best, it, i) => (Math.abs(it.predicted - it.actual) > Math.abs(items[best].predicted - items[best].actual) ? i : best), 0);
+            $("tBody").innerHTML = items.map((it, i) => {
+                const err = it.predicted - it.actual;
+                const p = pct(err, it.actual);
+                const shade = p === null ? "" : `background:${err >= 0 ? "rgba(26,115,232," : "rgba(217,48,37,"}${Math.min(Math.abs(p) / 40, 1) * 0.35})`;
+                return `<tr class="${it.drill ? "row-drill" : ""} ${i === worstIndex && err !== 0 ? "worst" : ""}" data-i="${i}">`
+                    + `<td>${it.label}</td><td>${it.actual.toLocaleString()}</td><td>${it.predicted.toLocaleString()}</td>`
+                    + (state.hasOff ? `<td>${it.off === null ? "—" : it.off.toLocaleString()}</td>` : "")
+                    + `<td>${signed(err)}</td><td style="${shade}">${fmtPct(p)}</td>`
+                    + (wapeLabel ? `<td>${fmtPct(it.wape, false)}</td>` : "") + "</tr>";
+            }).join("");
+            $("tBody").querySelectorAll("tr.row-drill").forEach((tr) => tr.addEventListener("click", () => drill(Number(tr.dataset.i))));
+            $("tableNote").textContent = {
+                month: "Error = predicted minus actual. 'Daily error' adds up each day's miss ignoring direction, so it can be large even when the month total is close (over- and under-predicted days cancel out). Click a row to see its weeks.",
+                week: "Weeks run Monday to Sunday and are cut at month edges. Click a row to see its days.",
+                day: "'Interval error' adds up each half-hour's miss ignoring direction; it is always high at low call volumes. Click a row to see its intervals.",
+                interval: "Each row is one interval. Calls are whole numbers, so small gaps here are mostly chance.",
+            }[level];
+        }
+
+        function render() {
+            current = buildItems();
+            renderCrumbs();
+            renderTiles(current.level, current.items);
+            renderCharts(current.level, current.items);
+            renderTable(current.level, current.items);
+            $("results").style.display = "block";
+        }
+
+        async function run() {
+            showError("");
+            if (!$("file").files.length) { showError("Choose a CDR dataset first."); return; }
+            const btn = $("runBtn");
+            btn.disabled = true;
+            try {
+                const mode = $("annual").value;
+                const wantOld = $("compare").checked && mode !== "off";
+                btn.textContent = wantOld ? "Running 1 of 2…" : "Running…";
+                const main = await callBacktest(mode);
+                let old = null;
+                if (wantOld) { btn.textContent = "Running 2 of 2…"; old = await callBacktest("off"); }
+                load(main, old);
+                render();
+            } catch (err) {
+                showError(err instanceof TypeError
+                    ? `Could not reach ${apiBase()}. Is the container running, and is this page served from an allowed origin (http://localhost:5500)?`
+                    : err.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "Run backtest";
+            }
+        }
+
+        $("runBtn").addEventListener("click", run);
+        $("apiBase").addEventListener("change", checkHealth);
+        checkHealth();
+    </script>
+</body>
+
+</html>

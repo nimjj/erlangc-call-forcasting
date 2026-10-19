@@ -2,9 +2,9 @@
 
 FastAPI application for forecasting contact-centre call demand from historical CDR files using STL decomposition with a rolling-profile fallback for short histories, calculating Erlang C staffing, and generating monthly agent rosters.
 
-Forecasts use robust seasonal-trend decomposition with LOESS (STL) when the historical date span is at least 14 days and contains two seasonal cycles. Shorter histories use rolling profiles. Responses identify the actual method as `STL` or `ROLLING_PROFILE`; the dashboard completion message shows the method and any fallback reason.
+Forecasts use robust seasonal-trend decomposition with LOESS (STL) when the historical date span is at least 14 days and contains two seasonal cycles. With at least 365 days of history, the forecast switches to a daily STL model that also learns yearly seasonality and US holiday effects (`annual_seasonality=auto`, the default). Shorter histories use rolling profiles. Responses identify the actual method as `STL` or `ROLLING_PROFILE`, and `decomposition_summary.model_variant` says which STL model ran; the dashboard completion message shows the method and any fallback reason.
 
-**Application version:** `4.2.0`
+**Application version:** `4.3.0`
 
 The application is **dockerized as a backend-only REST API**. The container serves the API alone; it does not include a browser frontend. Two browser pages ship in the repository for use outside the container:
 
@@ -12,6 +12,7 @@ The application is **dockerized as a backend-only REST API**. The container serv
 |---|---|---|
 | Dashboard | [static/index.html](static/index.html) | Full forecasting and scheduling UI. Served at `/` only when you run the app locally with Uvicorn (not in Docker). |
 | Backtest page | [backtest-ui/index.html](backtest-ui/index.html) | Standalone page that checks forecast accuracy against held-out data. Talks to the API (local or containerized) over REST. See [Testing with the backtest page](#testing-with-the-backtest-page). |
+| Drill-down page | [backtest-ui/drilldown.html](backtest-ui/drilldown.html) | Same backtest, plotted as predicted vs actual lines that you can zoom from month to week to day to half-hour to see where the forecast misses. Served the same way as the backtest page, at `http://localhost:5500/drilldown.html`. |
 
 [API documentation](api_documentation.md) contains endpoint examples and response details.
 
@@ -41,17 +42,21 @@ The application is **dockerized as a backend-only REST API**. The container serv
               call volume and handle time per 15/30/60-minute interval
                                          |
                                          v
-           4. Choose method                              stl.py
+           4. Choose method                              stl.py / annual.py
               history >= 14 days AND >= 2 seasonal cycles (1 week = 336 x 30-min)?
-                     |                                  |
-                    yes                                 no
-                     v                                  v
-           Robust STL decomposition            Rolling-profile fallback
-           trend + weekly seasonal + residual  average of matching past days
-           (linear trend extrapolation,        (same weekday / month position)
-            repeating seasonal cycle)
-                     |                                  |
-                     +----------------+-----------------+
+                     |                                            |
+                    yes: history >= 365 days and                  no
+                    annual_seasonality=auto?                      |
+                     |                     |                      |
+                    yes                    no                     v
+                     v                     v              Rolling-profile fallback
+           Daily STL + annual       Interval STL          average of matching past days
+           Fourier + US holidays,   trend + weekly        (same weekday / month position)
+           damped trend, weekday    seasonal + residual
+           intraday profiles        (linear trend,
+                     |               repeating cycle)
+                     |                     |                      |
+                     +---------------------+----------------------+
                                       v
            5. Average handling time per time-of-day slot (from history)
                                       |
@@ -63,9 +68,9 @@ The application is **dockerized as a backend-only REST API**. The container serv
             v                                                    v
    Forecast response (JSON)                         Backtest scoring    backtest.py
    summary, charts, per-interval rows               predicted vs actual held-out calls
-            |                                       and vs a seasonal-naive baseline
-            v                                       (repeat last training week):
-   POST /api/v1/schedule/monthly                    MAE, RMSE, WAPE, MAPE, bias
+            |                                       and vs seasonal-naive baselines
+            v                                       (last training week; same weekday
+   POST /api/v1/schedule/monthly                    a year earlier): MAE, RMSE, WAPE, MAPE, bias
    roster.py, shifts.py: 3 x 8-hour shifts,
    daily agent counts, rest rules
 ```
@@ -118,12 +123,15 @@ The backtest page checks forecast accuracy. It trains the model on the records b
 3. Open `http://localhost:5500`. The status next to the API URL turns green when the API is reachable.
 4. Choose a CDR file, set the **split date** (the first held-out day), and select **Run backtest**.
 
+For the month-to-week-to-day-to-interval view of the same results, open `http://localhost:5500/drilldown.html`. Tick "Also draw the old method" to overlay the weekly-only forecast; it runs the backtest twice and the old method takes about a minute on a year of data.
+
 Serve the page as shown rather than opening the HTML file directly. A file opened from disk has a `null` origin, which CORS rejects.
 
 Reading the results:
 
 - **Method badge:** `STL` means true STL ran. `ROLLING_PROFILE` means the training period was shorter than 14 days, so the fallback ran instead.
-- **Forecast vs baseline:** the baseline repeats the last training week. If the forecast doesn't beat it, the history is too short for STL to add value.
+- **Forecast vs baselines:** the weekly naive baseline repeats the last training week. With at least 371 training days a yearly naive baseline (same weekday 52 weeks earlier, scaled by the year-over-year ratio) is added. If the forecast doesn't beat them, the history is too short for STL to add value.
+- **Annual seasonality:** `Auto` uses the annual model once training covers 365 days; `Off` forces the interval-level weekly STL so you can compare the two.
 - **Daily WAPE / MAPE:** the most useful accuracy figures. Interval-level errors look very large at low call volumes, because being off by one call in a half hour is a 100% miss.
 - **Total bias:** positive means over-forecasting, which leads to overstaffing.
 
@@ -179,7 +187,7 @@ Calculator-Erlang-C/
 |   |-- core/
 |   |   |-- constants.py           # CDR fields, forecast fields, shift definitions
 |   |   |-- ingestion/             # CDR parsing, cleaning, interval construction
-|   |   |-- forecasting/           # STL/fallback forecasts, backtest scoring, dashboard aggregates
+|   |   |-- forecasting/           # STL/annual/fallback forecasts, US holiday calendar, backtest scoring, dashboard aggregates
 |   |   |-- queuing/               # Erlang C calculations and staffing cache
 |   |   `-- scheduling/            # Monthly rosters, shift times, and rest constraints
 |   `-- workers/                   # In-memory jobs and background forecast worker
@@ -239,6 +247,7 @@ Both `POST /api/v1/cdr/stl-forecast` and `POST /api/v1/cdr/stl-forecast/async` a
 | `forecast_days` | Integer | `365` | 1-3650; `365` selects the automatic forecast period below |
 | `seasonal_period` | Integer or omitted | Automatic | STL cycle in intervals; effective period must be at least 2 |
 | `trend_lookback_days` | Integer | `90` | Days of STL trend used for extrapolation; at least 7, limited to available history |
+| `annual_seasonality` | `auto` or `off` | `auto` | `auto` uses the annual model when history spans at least 365 days; `off` keeps the interval-level weekly STL |
 | `target_seconds` | Number | `20` | Non-negative Erlang C answer-time target in seconds |
 | `target_service_level` | Number | `80` | Converted fraction must be strictly between 0 and 1 |
 | `shrinkage` | Number | `30` | Converted fraction must be at least 0 and less than 1 |
@@ -299,6 +308,7 @@ Every file must retain at least one valid answered call. Records may cover parti
 The application combines cleaned records into fixed intervals. Overlapping uploads are added together; duplicate calls are not deduplicated. STL uses a continuous interval grid from midnight on the earliest valid date through the end of the latest valid date. Missing intervals and dates are filled with zero calls, including unrecorded hours at either boundary. This assumes the uploads cover those dates: a missing export is treated as no demand, not unknown demand.
 
 - **STL:** at least 14 calendar days and at least two cycles of `seasonal_period`. The default 336 half-hour intervals represents one week, so 14 days is the minimum.
+- **STL with annual seasonality:** at least 365 calendar days and `annual_seasonality=auto` (the default). `decomposition_summary.model_variant` is `daily_stl_annual`; otherwise it is `interval_stl_weekly` and `annual_seasonality_reason` says why the annual model did not run.
 - **Rolling-profile fallback:** a span under 14 days, or insufficient history for two cycles of a larger custom period. `decomposition_summary.applied` is false and `fallback_reason` explains why. There is no silent fallback if STL itself fails.
 
 ### STL decomposition and forecasting
@@ -311,7 +321,21 @@ The implementation uses [`statsmodels.tsa.seasonal.STL`](https://www.statsmodels
 4. Add trend and seasonality, clip negative predictions to zero, and round to whole calls. Residual noise is not added to point forecasts. Predictions are not fed back into STL as observed history.
 5. Estimate AHT by historical time-of-day handle time divided by calls, with a global call-weighted fallback, then calculate Erlang C staffing.
 
-This is a single-seasonality model. It does not separately learn yearly seasonality or holidays. Linear trend extrapolation can grow or decline substantially over long horizons; forecasts are point estimates without prediction intervals or guaranteed accuracy. Validate them against held-out call data before operational staffing decisions.
+This is a single-seasonality model. It does not separately learn yearly seasonality or holidays. Linear trend extrapolation can grow or decline substantially over long horizons; forecasts are point estimates without prediction intervals or guaranteed accuracy. Validate them against held-out call data before operational staffing decisions. Histories of a year or more use the annual model below instead, unless `annual_seasonality=off`.
+
+### Annual seasonality and holidays (365+ days of history)
+
+[`app/core/forecasting/annual.py`](app/core/forecasting/annual.py) forecasts **daily totals** on a `log1p` scale, so weekly, yearly and holiday effects multiply:
+
+1. **Weekly pattern:** robust STL with a 7-day period on daily totals. US holidays and outlier days (more than 4 robust standard deviations, on days expecting at least 5 calls) are replaced with fitted values, and STL is refitted.
+2. **Yearly pattern:** a Fourier curve over the day of the year (2 harmonics with 1-2 years of history, 4 with 2+ years), fitted together with a linear spline trend that has one knot per year. Fitting both together stops a seasonal dip, such as a quiet May-June, from being read as a downtrend.
+3. **Trend:** a straight line through the last `trend_lookback_days` of the deseasonalised series, damped by 0.9 per week so it levels off after about two months instead of running for a full year. The level is calibrated so the model reproduces the call total of the last 28 training days.
+4. **Holidays:** observed US federal holidays plus Thanksgiving eve, the day after Thanksgiving, Christmas Eve and New Year's Eve ([`calendar.py`](app/core/forecasting/calendar.py)). Each holiday's multiplier is learned from its past occurrences and blended with a class default (closure 0.15, reduced 0.6, pre-holiday peak 1.6, normal 1.0).
+5. **Intervals:** each forecast day is split with the weekday's intraday profile from the last 26 weeks (a pooled holiday profile on low-volume holidays). Interval counts are rounded with largest remainders so they add up to the daily total.
+
+`decomposition_summary` then reports `annual_harmonics`, `annual_peak_to_trough_ratio`, `trend_knots_days`, `trend_slope_per_day_log`, `trend_damping_per_week`, `terminal_level_calls_per_day`, `level_calibration_factor`, `weekly_factors`, `holiday_days_adjusted`, `holiday_multipliers`, `outliers_masked`, `outlier_dates`, `residual_std_log`, and `predicted_daily_mean`.
+
+One-off events (outages, storms) are masked when learning the pattern and are not predicted. The forecast calendar rules below are unchanged: with history ending on 30 September, the automatic yearly forecast covers the next calendar year starting 1 January, so pass an explicit `forecast_days` to forecast October onward.
 
 ### Short-history rolling profiles
 
@@ -364,7 +388,7 @@ Summary service level, occupancy, and ASA are arithmetic means over forecast int
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/` | Serve the dashboard, or service information if the HTML is absent |
-| `GET` | `/health` | Return `{"status":"healthy","version":"4.2.0"}` |
+| `GET` | `/health` | Return `{"status":"healthy","version":"4.3.0"}` |
 | `POST` | `/api/v1/cdr/stl-forecast` | Return the complete forecast synchronously |
 | `POST` | `/api/v1/cdr/stl-forecast/async` | Save uploads and submit a background forecast job |
 | `POST` | `/api/v1/cdr/backtest` | Train before a split date, forecast the held-out days, and score accuracy |

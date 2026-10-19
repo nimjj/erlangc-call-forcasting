@@ -1,6 +1,6 @@
 # API Documentation — CDR STL Forecast & Agent Scheduling API
 
-**Version:** `4.2.0`
+**Version:** `4.3.0`
 
 **Default base URL:** `http://127.0.0.1:8000`
 
@@ -49,7 +49,7 @@ Otherwise the fallback response is service information similar to:
 ```json
 {
   "status": "healthy",
-  "version": "4.2.0"
+  "version": "4.3.0"
 }
 ```
 
@@ -57,7 +57,7 @@ Otherwise the fallback response is service information similar to:
 
 # POST `/api/v1/cdr/stl-forecast`
 
-Forecast future contact volume using robust STL decomposition and calculate Erlang C staffing for every future interval. Spans under 14 days, or histories shorter than two requested seasonal cycles, use a labeled rolling-profile fallback. The response reports `method: STL` or `method: ROLLING_PROFILE`.
+Forecast future contact volume using robust STL decomposition and calculate Erlang C staffing for every future interval. Histories of at least 365 days use a daily STL model with annual seasonality and US holiday effects (unless `annual_seasonality=off`). Spans under 14 days, or histories shorter than two requested seasonal cycles, use a labeled rolling-profile fallback. The response reports `method: STL` or `method: ROLLING_PROFILE`, and `decomposition_summary.model_variant` is `daily_stl_annual` or `interval_stl_weekly` for STL.
 
 ## Content type
 
@@ -74,6 +74,7 @@ multipart/form-data
 | `forecast_days` | integer | `365` | no | 1-3650; the default 365 selects the automatic forecast period below |
 | `seasonal_period` | integer or omitted | automatic | no | STL cycle length in intervals; >= 2 when nonzero; omitted/0 resolves to intervals per week |
 | `trend_lookback_days` | integer | `90` | no | Recent days of STL trend used for linear extrapolation; >= 7 |
+| `annual_seasonality` | `auto` or `off` | `auto` | no | `auto` uses the daily model with annual seasonality and US holidays when history spans at least 365 days; `off` keeps the interval-level weekly STL |
 | `target_seconds` | number | `20` | no | >= 0 |
 | `target_service_level` | number | `80` | no | after percent conversion, strictly between 0 and 1 |
 | `shrinkage` | number | `30` | no | after percent conversion, >= 0 and < 1 |
@@ -186,7 +187,19 @@ When the historical span is at least 14 days and the grid contains at least `2 *
 
 Otherwise the method is `ROLLING_PROFILE`: earlier daily patterns are averaged recursively, using matching weekdays/calendar positions where available. The response sets `decomposition_summary.applied=false` and includes `fallback_reason`. Errors fitting an eligible STL series are reported as errors, not silently converted to rolling forecasts.
 
-STL models one seasonal period. Annual horizons do not imply a separate yearly seasonal component. These are point forecasts without prediction intervals; linear extrapolation can overstate or understate distant demand. Evaluate accuracy against held-out observations.
+The interval STL models one seasonal period and has no yearly component. These are point forecasts without prediction intervals; linear extrapolation can overstate or understate distant demand. Evaluate accuracy against held-out observations.
+
+### Annual seasonality (365+ days of history)
+
+With `annual_seasonality=auto` (default) and a historical span of at least 365 days, `app/core/forecasting/annual.py` forecasts daily totals on a `log1p` scale instead:
+
+1. Robust weekly STL (period 7) on daily totals, refitted after replacing US holidays and outlier days with fitted values.
+2. An annual Fourier curve over day of year (2 harmonics for 1-2 years of history, 4 for 2+ years), fitted jointly with a linear spline trend with one knot per year.
+3. A linear trend over the last `trend_lookback_days` of the deseasonalised series, damped by 0.9 per week; the level is calibrated to reproduce the last 28 training days' call total.
+4. Holiday multipliers learned from past occurrences of each observed US federal holiday, Thanksgiving eve, the day after Thanksgiving, Christmas Eve and New Year's Eve, blended with class defaults.
+5. Each day split into intervals with the weekday's intraday profile from the last 26 weeks; largest-remainder rounding keeps interval counts summing to the daily total.
+
+`decomposition_summary` adds `model_variant: "daily_stl_annual"`, `annual_seasonality: true`, `annual_harmonics`, `annual_peak_to_trough_ratio`, `trend_knots_days`, `trend_lookback_days_used`, `trend_slope_per_day_log`, `trend_damping_per_week`, `terminal_level_calls_per_day`, `level_calibration_factor`, `level_calibration_days`, `weekly_factors`, `holiday_days_adjusted`, `holiday_multipliers`, `outliers_masked`, `outlier_dates`, `residual_std_log`, and `predicted_daily_mean`. When the annual model does not run, `annual_seasonality` is `false` and `annual_seasonality_reason` explains why.
 
 ### Future AHT
 
@@ -277,6 +290,7 @@ Representative shape:
     "forecast_days": 365,
     "seasonal_period": 336,
     "trend_lookback_days": 90,
+    "annual_seasonality": "auto",
     "target_seconds": 20,
     "target_service_level_percent": 80,
     "shrinkage_percent": 30,
@@ -403,7 +417,7 @@ Streams server-sent events as `text/event-stream` when progress or status change
 
 # POST `/api/v1/cdr/backtest`
 
-Measures forecast accuracy on held-out data. Records before `train_end` are used for training, and the forecast for the remaining days is compared with the calls that actually arrived and with a simple baseline. The standalone page in `backtest-ui/` calls this endpoint; see the README section "Testing with the backtest page".
+Measures forecast accuracy on held-out data. Records before `train_end` are used for training, and the forecast for the remaining days is compared with the calls that actually arrived and with simple baselines. The standalone page in `backtest-ui/` calls this endpoint; see the README section "Testing with the backtest page".
 
 The request is synchronous. It returns the full result in one response and runs on a worker thread, so other requests stay responsive while it computes.
 
@@ -422,6 +436,7 @@ multipart/form-data
 | `interval_minutes` | integer | `30` | no | Must divide 1440 |
 | `seasonal_period` | integer | one week of intervals | no | Same meaning as in the forecast endpoint |
 | `trend_lookback_days` | integer | `90` | no | At least 7; limited to the available training history |
+| `annual_seasonality` | `auto` or `off` | `auto` | no | `auto` uses the daily model with annual seasonality and US holidays when history spans at least 365 days; `off` keeps the interval-level weekly STL |
 | `target_seconds` | number | `20` | no | Passed to the staffing calculation |
 | `target_service_level` | number | `80` | no | Passed to the staffing calculation |
 | `shrinkage` | number | `30` | no | Passed to the staffing calculation |
@@ -439,7 +454,9 @@ multipart/form-data
 
 The **seasonal-naive baseline** repeats the last 7 days of training data, interval for interval. It uses no test data. A useful forecast should beat it.
 
-`metrics.model` scores the forecast and `metrics.seasonal_naive` scores the baseline, using the same fields:
+When the training span is at least 371 days, a **yearly seasonal-naive baseline** is added: each interval takes the value from the same weekday and time 364 days earlier (or a multiple of 364 days, so the source is always training data), multiplied by the ratio of calls in the last 91 training days to the same 91 days a year earlier (clipped to 0.5-2.0). It is reported as `metrics.seasonal_naive_yearly` (with `yoy_ratio`) and as `baseline_yearly` in the `daily` and `intervals` rows.
+
+`metrics.model` scores the forecast and `metrics.seasonal_naive` (and `seasonal_naive_yearly`, when present) score the baselines, using the same fields:
 
 | Field | Meaning |
 |---|---|
@@ -492,6 +509,7 @@ The `daily` and `intervals` arrays below are shortened:
     "...": "same fields as the forecast endpoint's decomposition_summary"
   },
   "interval_minutes": 30,
+  "annual_seasonality": "auto",
   "metrics": {
     "model": {
       "interval_mae": 0.551,
@@ -529,9 +547,10 @@ The `daily` and `intervals` arrays below are shortened:
 | `forecast_method` | `STL` or `ROLLING_PROFILE` |
 | `fallback_reason` | Why STL was not applied, or `null` |
 | `decomposition_summary` | Same structure as in the forecast response |
-| `metrics` | Accuracy for the forecast (`model`) and the baseline (`seasonal_naive`) |
-| `daily` | Daily totals of actual, predicted, and baseline calls for each test day |
-| `intervals` | Actual, predicted, and baseline calls for each scored interval |
+| `annual_seasonality` | The requested `annual_seasonality` value; `decomposition_summary.model_variant` shows which model ran |
+| `metrics` | Accuracy for the forecast (`model`), the weekly baseline (`seasonal_naive`), and, with 371+ training days, the yearly baseline (`seasonal_naive_yearly`) |
+| `daily` | Daily totals of actual, predicted, and baseline calls (plus `baseline_yearly` when present) for each test day |
+| `intervals` | Actual, predicted, and baseline calls (plus `baseline_yearly` when present) for each scored interval |
 
 Errors follow the same rules as the forecast endpoint: HTTP 400 for data and split problems, 413 for oversized files, and 500 prefixed with `Backtest failed:`.
 
