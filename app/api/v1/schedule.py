@@ -29,6 +29,12 @@ def monthly_schedule(request: MonthlyScheduleRequest) -> dict:
             month=request.month,
             agent_count=request.agent_count,
             shift_start_times=request.shift_start_times,
+            coverage_percent=request.coverage_percent,
+            night_minimum_agents=request.night_minimum_agents,
+            weekend_minimum_agents=request.weekend_minimum_agents,
+            target_seconds=request.target_seconds,
+            target_service_level=request.target_service_level,
+            shrinkage=request.shrinkage,
         )
 
         return {

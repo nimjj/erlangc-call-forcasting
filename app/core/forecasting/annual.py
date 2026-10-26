@@ -21,11 +21,12 @@ from statsmodels.tsa.seasonal import STL
 from app.core.forecasting.calendar import DEFAULT_MULTIPLIERS, holiday_class, us_holidays
 
 MIN_ANNUAL_HISTORY_DAYS = 365
-TREND_DAMPING_PER_WEEK = 0.9
+TREND_DAMPING_PER_WEEK = 0.6
+ANNUAL_HARMONICS = 3  # with 2+ years of history; 2 with less
 OUTLIER_SIGMA = 4.0
 OUTLIER_MIN_EXPECTED_CALLS = 5.0
-# Seasonal smoother spans ~27 same-weekday observations; weekly factors average 13 weeks.
-STL_SEASONAL_SMOOTHER = 27
+# Seasonal smoother spans ~105 same-weekday observations; weekly factors average 13 weeks.
+STL_SEASONAL_SMOOTHER = 105
 WEEKLY_FACTOR_DAYS = 91
 LEVEL_CALIBRATION_DAYS = 28
 PROFILE_DAYS = 182
@@ -121,7 +122,7 @@ def predict_annual(
     fit = STL(clean, period=7, seasonal=STL_SEASONAL_SMOOTHER, robust=True).fit()
     weekly = np.asarray(fit.seasonal)
 
-    harmonics = 4 if len(days) >= 730 else 2
+    harmonics = ANNUAL_HARMONICS if len(days) >= 730 else 2
     steps = np.arange(len(days), dtype=float)
     trend_design, knots = _trend_basis(steps, len(days))
     fourier = _fourier(days, harmonics)

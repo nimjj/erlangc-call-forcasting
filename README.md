@@ -4,7 +4,7 @@ FastAPI application for forecasting contact-centre call demand from historical C
 
 Forecasts use robust seasonal-trend decomposition with LOESS (STL) when the historical date span is at least 14 days and contains two seasonal cycles. With at least 365 days of history, the forecast switches to a daily STL model that also learns yearly seasonality and US holiday effects (`annual_seasonality=auto`, the default). Shorter histories use rolling profiles. Responses identify the actual method as `STL` or `ROLLING_PROFILE`, and `decomposition_summary.model_variant` says which STL model ran; the dashboard completion message shows the method and any fallback reason.
 
-**Application version:** `4.3.0`
+**Application version:** `4.4.0`
 
 The application is **dockerized as a backend-only REST API**. The container serves the API alone; it does not include a browser frontend. Two browser pages ship in the repository for use outside the container:
 
@@ -328,8 +328,8 @@ This is a single-seasonality model. It does not separately learn yearly seasonal
 [`app/core/forecasting/annual.py`](app/core/forecasting/annual.py) forecasts **daily totals** on a `log1p` scale, so weekly, yearly and holiday effects multiply:
 
 1. **Weekly pattern:** robust STL with a 7-day period on daily totals. US holidays and outlier days (more than 4 robust standard deviations, on days expecting at least 5 calls) are replaced with fitted values, and STL is refitted.
-2. **Yearly pattern:** a Fourier curve over the day of the year (2 harmonics with 1-2 years of history, 4 with 2+ years), fitted together with a linear spline trend that has one knot per year. Fitting both together stops a seasonal dip, such as a quiet May-June, from being read as a downtrend.
-3. **Trend:** a straight line through the last `trend_lookback_days` of the deseasonalised series, damped by 0.9 per week so it levels off after about two months instead of running for a full year. The level is calibrated so the model reproduces the call total of the last 28 training days.
+2. **Yearly pattern:** a Fourier curve over the day of the year (2 harmonics with 1-2 years of history, 3 with 2+ years), fitted together with a linear spline trend that has one knot per year. Fitting both together stops a seasonal dip, such as a quiet May-June, from being read as a downtrend.
+3. **Trend:** a straight line through the last `trend_lookback_days` of the deseasonalised series, damped by 0.6 per week so it levels off after about a month instead of running for a full year. The level is calibrated so the model reproduces the call total of the last 28 training days.
 4. **Holidays:** observed US federal holidays plus Thanksgiving eve, the day after Thanksgiving, Christmas Eve and New Year's Eve ([`calendar.py`](app/core/forecasting/calendar.py)). Each holiday's multiplier is learned from its past occurrences and blended with a class default (closure 0.15, reduced 0.6, pre-holiday peak 1.6, normal 1.0).
 5. **Intervals:** each forecast day is split with the weekday's intraday profile from the last 26 weeks (a pooled holiday profile on low-volume holidays). Interval counts are rounded with largest remainders so they add up to the daily total.
 
@@ -388,7 +388,7 @@ Summary service level, occupancy, and ASA are arithmetic means over forecast int
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/` | Serve the dashboard, or service information if the HTML is absent |
-| `GET` | `/health` | Return `{"status":"healthy","version":"4.3.0"}` |
+| `GET` | `/health` | Return `{"status":"healthy","version":"4.4.0"}` |
 | `POST` | `/api/v1/cdr/stl-forecast` | Return the complete forecast synchronously |
 | `POST` | `/api/v1/cdr/stl-forecast/async` | Save uploads and submit a background forecast job |
 | `POST` | `/api/v1/cdr/backtest` | Train before a split date, forecast the held-out days, and score accuracy |
@@ -417,7 +417,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/cdr/stl-forecast/async \
 
 ## Monthly scheduling
 
-Send JSON containing `forecast`, `year`, `month` (1-12), optional `agent_count`, and optional `shift_start_times` to `/api/v1/schedule/monthly`. Forecast rows must contain `interval_start` and `scheduled_agents`; use the original forecast response, not the aggregated CSV. `agent_count` is null/omitted for automatic estimation, or an integer from 1 to 10,000.
+Send JSON containing `forecast`, `year`, `month` (1-12), optional `agent_count`, and optional `shift_start_times` to `/api/v1/schedule/monthly`. Forecast rows must contain `interval_start`, `scheduled_agents`, `call_volume` and `aht_seconds`; use the original forecast response, not the aggregated CSV. Optional `coverage_percent` (default 80), `night_minimum_agents` and `weekend_minimum_agents` (default 3 each) set how many agents each shift is staffed with. `agent_count` is null/omitted for automatic estimation, or an integer from 1 to 10,000.
 
 | Shift code | Dashboard label | Hours |
 |---|---|---|
@@ -425,7 +425,7 @@ Send JSON containing `forecast`, `year`, `month` (1-12), optional `agent_count`,
 | `MORNING` | `08:00-16:00` | 08:00-16:00 |
 | `EVENING` | `16:00-00:00` | 16:00-24:00 |
 
-Each date/shift requires the maximum `scheduled_agents` from its forecast intervals. Headcount is estimated across Monday-Sunday weeks as the maximum of `ceil(weekly required shift slots / 5)` and peak total daily staffing. A supplied count below this estimate is rejected.
+Each date/shift is sized to the busiest interval it is likely to see: 300 simulated days around the forecast, converted to agents with Erlang C, and the agents that cover `coverage_percent` of them. Night shifts and weekend day shifts are then raised to their minimums. This covered about 93% of shifts in the mirrored-data test, against 55% when staffing from the point forecast (the maximum `scheduled_agents` in the shift, still available with `coverage_percent: null` and both minimums 0). See [Shift staffing](api_documentation.md#shift-staffing). Headcount is estimated across Monday-Sunday weeks as the maximum of `ceil(weekly required shift slots / 5)` and peak total daily staffing. A supplied count below this estimate is rejected.
 
 The generator assigns at most one shift per day, at most five working days per week, and at least eight hours between successive work shifts within the generated month. Candidates are ranked by weekly workdays, total assignments, shift-specific assignments, and agent ID. All remaining agent/date combinations become `OFF`. Agents are named `Agent 001`, `Agent 002`, etc.
 

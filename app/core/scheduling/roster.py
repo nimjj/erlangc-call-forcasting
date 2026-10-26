@@ -9,6 +9,7 @@ def build_monthly_agent_schedule(
     month: int,
     agent_count: int | None = None,
     shift_start_times: list[str] | None = None,
+    **staffing_policy,
 ) -> tuple[pd.DataFrame, dict]:
 
     requirements = build_shift_requirements(
@@ -16,6 +17,7 @@ def build_monthly_agent_schedule(
         year=year,
         month=month,
         shift_start_times=shift_start_times,
+        **staffing_policy,
     )
 
     minimum_agents = calculate_schedule_headcount(
@@ -168,6 +170,11 @@ def build_monthly_agent_schedule(
         "agent_count": int(agent_count),
         "shift_hours": 8,
         "shifts": shift_definitions(shift_start_times),
+        "staffing_policy": {
+            "coverage_percent": staffing_policy.get("coverage_percent"),
+            "night_minimum_agents": staffing_policy.get("night_minimum_agents", 0),
+            "weekend_minimum_agents": staffing_policy.get("weekend_minimum_agents", 0),
+        },
         "working_days_per_week": 5,
         "days_off_per_week": 2,
         "total_required_shift_assignments": int(

@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forecast vs Real Calls</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #f4f6f8;
+            --card: #ffffff;
+            --text: #202124;
+            --muted: #5f6368;
+            --border: #dadce0;
+            --head: #f8f9fa;
+            --hover: #f1f6fe;
+            --chip: #e8f0fe;
+            --accent: #1a73e8;
+            --good: #188038;
+            --bad: #c5221f;
+            --actual: #202124;
+            --predicted: #1a73e8;
+            --baseline: #e37400;
+            --over: #1a73e8;
+            --under: #d93025;
+            --over-rgb: 26, 115, 232;
+            --under-rgb: 217, 48, 37;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #14171a;
+                --card: #1e2227;
+                --text: #e8eaed;
+                --muted: #9aa0a6;
+                --border: #3c4043;
+                --head: #262b31;
+                --hover: #242d3a;
+                --chip: #263249;
+                --accent: #8ab4f8;
+                --good: #81c995;
+                --bad: #f28b82;
+                --actual: #e8eaed;
+                --predicted: #8ab4f8;
+                --baseline: #fbbc04;
+                --over: #8ab4f8;
+                --under: #f28b82;
+                --over-rgb: 138, 180, 248;
+                --under-rgb: 242, 139, 130;
+            }
+        }
+
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+        .container { width: min(1300px, calc(100% - 32px)); margin: 24px auto; }
+        h1 { margin: 0 0 4px; font-size: 24px; }
+        h2 { margin: 0 0 10px; font-size: 16px; }
+        .subtitle { color: var(--muted); margin: 0 0 6px; }
+        .caveat { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+        .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
+        .two-col > .card { margin-bottom: 0; }
+        .two-col + .card, .card + .two-col { margin-top: 16px; }
+
+        .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 15px; margin-bottom: 4px; }
+        .crumbs button { padding: 4px 10px; border: 0; border-radius: 6px; background: var(--chip); color: var(--accent); font: inherit; font-size: 14px; cursor: pointer; }
+        .crumbs button.current { background: transparent; color: var(--text); font-weight: bold; cursor: default; }
+        .crumbs .sep { color: var(--muted); }
+        .method { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+        .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0 4px; }
+        .tile { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+        .tile span { display: block; font-size: 12px; color: var(--muted); }
+        .tile b { font-size: 20px; }
+        .tile small { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+        .chart-box { position: relative; height: 330px; }
+        .chart-box.small { height: 150px; margin-top: 6px; }
+        .chart-box.hours { height: 240px; }
+        .legend-note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+        .legend-note i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 10px; vertical-align: middle; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: right; }
+        th:first-child, td:first-child { text-align: left; }
+        th { background: var(--head); font-weight: 600; position: sticky; top: 0; }
+        tr.row-drill { cursor: pointer; }
+        tr.row-drill:hover td { background: var(--hover); }
+        tr.worst td:first-child::after { content: " largest miss"; font-size: 11px; color: var(--bad); margin-left: 6px; }
+        .table-scroll { max-height: 440px; overflow: auto; }
+        .tag { display: inline-block; font-size: 11px; color: var(--baseline); border: 1px solid var(--baseline); border-radius: 10px; padding: 0 6px; margin-left: 6px; white-space: nowrap; }
+        .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+        .modes { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 0 0 12px; }
+        .modes button { padding: 8px 16px; border: 0; background: var(--card); color: var(--muted); font: inherit; cursor: pointer; }
+        .modes button + button { border-left: 1px solid var(--border); }
+        .modes button.active { background: var(--chip); color: var(--accent); font-weight: bold; }
+        #fatal { display: none; background: #fce8e6; color: #c5221f; padding: 12px; border-radius: 6px; }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Forecast vs Real Calls</h1>
+        <p class="subtitle" id="subtitle"></p>
+        <div class="modes" role="group" aria-label="View">
+            <button id="modeCalls" class="active" type="button">Calls</button>
+            <button id="modeAgents" type="button">Agents per shift</button>
+        </div>
+        <p class="caveat" id="modeNote"></p>
+        <div id="fatal">The data was not embedded. Run <code>python tools/build_comparison_page.py</code> and open the file it writes.</div>
+
+        <div id="app">
+            <div class="card">
+                <div class="tiles" id="headline"></div>
+            </div>
+
+            <div class="card">
+                <div class="crumbs" id="crumbs"></div>
+                <div class="tiles" id="tiles"></div>
+            </div>
+
+            <div class="card">
+                <div class="chart-box"><canvas id="mainChart"></canvas></div>
+                <div class="chart-box small"><canvas id="errChart"></canvas></div>
+                <div class="legend-note">
+                    Lower chart = forecast minus real for each point.
+                    <i style="background:var(--over)"></i>above zero: forecast too high
+                    <i style="background:var(--under)"></i>below zero: forecast too low.
+                    Click a name in the chart legend to hide or show a line; the orange "same day last year" line is hidden to start with.
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="table-scroll">
+                    <table>
+                        <thead><tr id="tHead"></tr></thead>
+                        <tbody id="tBody"></tbody>
+                    </table>
+                </div>
+                <div class="hint" id="tableNote"></div>
+            </div>
+
+            <div id="insights">
+                <div class="two-col">
+                    <div class="card">
+                        <h2 id="weekdayTitle">By day of week</h2>
+                        <div class="table-scroll"><table id="weekdayTable"></table></div>
+                        <div class="hint" id="weekdayHint">Shows whether the forecast is consistently off on particular weekdays.</div>
+                    </div>
+                    <div class="card">
+                        <h2 id="typeTitle">Normal days vs holidays and events</h2>
+                        <div class="table-scroll"><table id="typeTable"></table></div>
+                        <div class="hint" id="typeHint">Holidays are US federal holidays plus Thanksgiving eve/after and Christmas/New Year's eve. Events are the one-off spikes in the real year.</div>
+                    </div>
+                </div>
+
+                <div class="card" id="hoursCard">
+                    <h2>By time of day <span class="hint" style="font-weight:normal">(all days in view added together)</span></h2>
+                    <div class="chart-box hours"><canvas id="hourChart"></canvas></div>
+                </div>
+
+                <div class="card">
+                    <h2 id="missTitle">Ten largest misses in view</h2>
+                    <div class="table-scroll"><table id="missTable"></table></div>
+                    <div class="hint" id="missHint">Click a row to open that day's half-hour view.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const DATA = /*__DATA__*/null;
+        const $ = (id) => document.getElementById(id);
+        const charts = {};
+        const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
+        const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+        const state = { days: [], slots: new Map(), shiftRows: new Map(), mode: "calls" };
+        const SHIFT_NAMES = ["Night 00-08", "Morning 08-16", "Evening 16-24"];
+        const NOTES = {
+            calls: "The mirrored years were shaped from this same real year, so the errors below are likely smaller than a forecast for a genuinely unseen year would show. "
+                + "Calls are answered calls only (abandoned and timed-out calls are left out, as the app does). Click a point, bar or table row to zoom in.",
+            agents: "An agent-shift is one agent for one 8-hour shift. Needed = the agents the real calls required in the shift's busiest half-hour (Erlang C at the service target, with shrinkage). "
+                + "Planned = what the plan schedules from the forecast: each shift sized so most shifts are covered, with minimums on nights and weekends. "
+                + "Old rule = the busiest half-hour of the plain forecast. A shift is covered when planned is at least needed. Click a point, bar or table row to zoom in.",
+        };
+        const path = { month: null, week: null, day: null };
+        let current = { items: [], level: "month" };
+
+        const utc = (d) => { const [y, m, dd] = d.split("-").map(Number); return new Date(Date.UTC(y, m - 1, dd)); };
+        const iso = (dt) => dt.toISOString().slice(0, 10);
+        const weekStart = (d) => { const dt = utc(d); dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7)); return iso(dt); };
+        const shortDate = (d) => { const dt = utc(d); return `${DAYS[dt.getUTCDay()]} ${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]}`; };
+        const rangeDate = (d) => { const dt = utc(d); return `${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]}`; };
+        const monthLabel = (m) => `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+        const signed = (n) => `${n > 0 ? "+" : ""}${n.toLocaleString()}`;
+        const pct = (num, den) => (den > 0 ? (100 * num) / den : null);
+        const fmtPct = (v, sign = true) => (v === null ? "—" : `${sign && v > 0 ? "+" : ""}${v.toFixed(1)}%`);
+        const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
+        const tagHtml = (t) => (t ? `<span class="tag">${t}</span>` : "");
+        const shade = (err, p) => (p === null ? "" : `background:rgba(${err >= 0 ? "var(--over-rgb)" : "var(--under-rgb)"},${Math.min(Math.abs(p) / 40, 1) * 0.35})`);
+        const slotTime = (i) => { const m = i * DATA.interval_minutes; return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; };
+
+        function load() {
+            state.days = DATA.days.map((d) => ({ date: d.d, actual: d.a, predicted: d.p, base: d.y, tag: d.tag, dow: utc(d.d).getUTCDay() }));
+            for (const [date, rows] of Object.entries(DATA.slots)) {
+                state.slots.set(date, rows.map(([actual, predicted], i) => ({ t: slotTime(i), actual, predicted })));
+            }
+            for (const [date, rows] of Object.entries(DATA.shifts)) {
+                state.shiftRows.set(date, rows.map(([needed, planned, old], code) => ({ date, code, needed, planned, old })));
+            }
+        }
+
+        const slotAbsError = (date) => sum(state.slots.get(date) || [], (s) => Math.abs(s.predicted - s.actual));
+
+        function aggregate(key, label, days, drill) {
+            const actual = sum(days, (d) => d.actual);
+            const predicted = sum(days, (d) => d.predicted);
+            const absErr = sum(days, (d) => Math.abs(d.predicted - d.actual));
+            const base = days.every((d) => d.base !== null && d.base !== undefined) ? sum(days, (d) => d.base) : null;
+            const tags = days.filter((d) => d.tag).length;
+            return { key, label, actual, predicted, base, wape: pct(absErr, actual), drill, tag: tags ? `${tags} holiday/event day${tags > 1 ? "s" : ""}` : "" };
+        }
+
+        function scopeDays() {
+            let days = state.days;
+            if (path.month) days = days.filter((d) => d.date.slice(0, 7) === path.month);
+            if (path.week) days = days.filter((d) => weekStart(d.date) === path.week);
+            return days;
+        }
+
+        function buildItems() {
+            if (path.day) {
+                const slots = state.slots.get(path.day) || [];
+                const live = slots.map((s, i) => (s.actual || s.predicted ? i : -1)).filter((i) => i >= 0);
+                const from = live.length ? Math.max(0, live[0] - 1) : 0;
+                const to = live.length ? Math.min(slots.length - 1, live[live.length - 1] + 1) : slots.length - 1;
+                return { level: "interval", items: slots.slice(from, to + 1).map((s) => ({ key: s.t, label: s.t, actual: s.actual, predicted: s.predicted, base: null, wape: null, drill: false, tag: "" })) };
+            }
+            if (path.week) {
+                return { level: "day", items: scopeDays().map((d) => ({
+                    key: d.date, label: shortDate(d.date), actual: d.actual, predicted: d.predicted, base: d.base,
+                    wape: pct(slotAbsError(d.date), d.actual), drill: true, tag: d.tag || "",
+                })) };
+            }
+            const groups = new Map();
+            if (path.month) {
+                for (const d of scopeDays()) {
+                    const w = weekStart(d.date);
+                    if (!groups.has(w)) groups.set(w, []);
+                    groups.get(w).push(d);
+                }
+                return { level: "week", items: [...groups].map(([w, days]) =>
+                    aggregate(w, `${rangeDate(days[0].date)} – ${rangeDate(days[days.length - 1].date)}`, days, true)) };
+            }
+            for (const d of state.days) {
+                const m = d.date.slice(0, 7);
+                if (!groups.has(m)) groups.set(m, []);
+                groups.get(m).push(d);
+            }
+            return { level: "month", items: [...groups].map(([m, days]) => aggregate(m, monthLabel(m), days, true)) };
+        }
+
+        function drill(index) {
+            const item = current.items[index];
+            if (!item || !item.drill) return;
+            if (current.level === "month") path.month = item.key;
+            else if (current.level === "week") path.week = item.key;
+            else if (current.level === "day") path.day = item.key;
+            render();
+        }
+
+        function goTo(level) {
+            if (level === "all") path.month = path.week = path.day = null;
+            if (level === "month") path.week = path.day = null;
+            if (level === "week") path.day = null;
+            render();
+        }
+
+        function jumpToDay(date) {
+            path.month = date.slice(0, 7);
+            path.week = weekStart(date);
+            path.day = date;
+            render();
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+
+        function renderCrumbs() {
+            const parts = [["all", "All months"]];
+            if (path.month) parts.push(["month", monthLabel(path.month)]);
+            if (path.week) {
+                const days = scopeDays();
+                parts.push(["week", `Week ${rangeDate(days[0].date)} – ${rangeDate(days[days.length - 1].date)}`]);
+            }
+            if (path.day) parts.push(["day", shortDate(path.day)]);
+            $("crumbs").innerHTML = parts.map(([level, text], i) => {
+                const last = i === parts.length - 1;
+                return `${i ? '<span class="sep">›</span>' : ""}<button class="${last ? "current" : ""}" data-level="${level}" ${last ? "disabled" : ""}>${text}</button>`;
+            }).join("") + `<span class="method">${DATA.method} · ${DATA.variant || ""} · trained ${DATA.split.train_start} to ${DATA.split.train_end}</span>`;
+            $("crumbs").querySelectorAll("button[data-level]").forEach((b) => b.addEventListener("click", () => goTo(b.dataset.level)));
+        }
+
+        function renderHeadline() {
+            const m = DATA.metrics.model;
+            const months = new Map();
+            for (const d of state.days) {
+                const k = d.date.slice(0, 7);
+                const e = months.get(k) || { a: 0, p: 0 };
+                e.a += d.actual; e.p += d.predicted;
+                months.set(k, e);
+            }
+            const worst = [...months].map(([k, e]) => [k, pct(e.p - e.a, e.a)]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0];
+            const yearly = DATA.metrics.yearly_naive;
+            const tiles = [
+                ["Real calls", m.total_actual_calls.toLocaleString(), `${DATA.split.test_start} to ${DATA.split.test_end}`],
+                ["Forecast calls", m.total_predicted_calls.toLocaleString(), `bias ${fmtPct(m.bias_percent)}`],
+                ["Daily error (WAPE)", fmtPct(m.daily_wape_percent, false), yearly ? `same day last year: ${fmtPct(yearly.daily_wape_percent, false)}` : "total daily miss ÷ real calls"],
+                ["Half-hour error (WAPE)", fmtPct(m.interval_wape_percent, false), "high at low volumes"],
+                ["Worst month", monthLabel(worst[0]), `${fmtPct(worst[1])} vs real`],
+            ];
+            $("headline").innerHTML = tiles.map(([k, v, s]) => `<div class="tile"><span>${k}</span><b>${v}</b><small>${s}</small></div>`).join("");
+        }
+
+        function renderTiles(level, items) {
+            const actual = sum(items, (i) => i.actual);
+            const predicted = sum(items, (i) => i.predicted);
+            const bias = pct(predicted - actual, actual);
+            const absErr = sum(items, (i) => Math.abs(i.predicted - i.actual));
+            const over = items.filter((i) => i.predicted > i.actual).length;
+            const under = items.filter((i) => i.predicted < i.actual).length;
+            const noun = { month: "months", week: "weeks", day: "days", interval: "intervals" }[level];
+            const errLabel = { month: "Month-by-month error", week: "Week-by-week error", day: "Day-by-day error", interval: "Interval-by-interval error" }[level];
+            const tiles = [
+                ["Real calls", actual.toLocaleString(), ""],
+                ["Forecast calls", predicted.toLocaleString(), ""],
+                ["Net bias", fmtPct(bias), bias === null ? "" : bias > 0 ? "forecast too high overall" : bias < 0 ? "forecast too low overall" : ""],
+                [errLabel, fmtPct(pct(absErr, actual), false), "total miss, ignoring direction"],
+                [`${noun[0].toUpperCase() + noun.slice(1)} over / under`, `${over} / ${under}`, `${items.length - over - under} exact`],
+            ];
+            $("tiles").innerHTML = tiles.map(([k, v, s]) => `<div class="tile"><span>${k}</span><b>${v}</b><small>${s}</small></div>`).join("");
+        }
+
+        function drawChart(id, config) {
+            if (charts[id]) charts[id].destroy();
+            charts[id] = new Chart($(id), config);
+        }
+
+        function renderCharts(level, items) {
+            const labels = items.map((i) => i.label + (level === "day" && i.tag ? " ★" : ""));
+            const isInterval = level === "interval";
+            const stepped = isInterval ? "middle" : false;
+            const datasets = [
+                { label: "Real calls", data: items.map((i) => i.actual), borderColor: css("--actual"), backgroundColor: css("--actual"), borderWidth: 2, pointRadius: isInterval ? 0 : 3, tension: 0.15, stepped },
+                { label: "Forecast (from mirrored years)", data: items.map((i) => i.predicted), borderColor: css("--predicted"), backgroundColor: css("--predicted"), borderWidth: 2, pointRadius: isInterval ? 0 : 3, tension: 0.15, stepped },
+            ];
+            if (!isInterval && items.every((i) => i.base !== null && i.base !== undefined)) {
+                datasets.push({ label: "Same day last year (baseline)", data: items.map((i) => i.base), borderColor: css("--baseline"), backgroundColor: css("--baseline"), borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, tension: 0.15, hidden: true });
+            }
+            const clickable = !isInterval;
+            const onClick = (evt, _els, chart) => {
+                const hit = chart.getElementsAtEventForMode(evt.native, "index", { intersect: false }, false);
+                if (hit.length) drill(hit[0].index);
+            };
+            const onHover = (evt, els) => { evt.native.target.style.cursor = clickable && els.length ? "pointer" : "default"; };
+            const axisX = { ticks: { maxTicksLimit: 16, autoSkip: true } };
+            const fixWidth = { afterFit: (scale) => { scale.width = 64; } };
+
+            drawChart("mainChart", {
+                type: "line",
+                data: { labels, datasets },
+                options: {
+                    maintainAspectRatio: false, onClick, onHover,
+                    interaction: { mode: "index", intersect: false },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                footer: (ctx) => {
+                                    const it = items[ctx[0].dataIndex];
+                                    const err = it.predicted - it.actual;
+                                    return `Error: ${signed(err)} (${fmtPct(pct(err, it.actual))})` + (it.tag ? `\n${it.tag}` : "");
+                                },
+                            },
+                        },
+                    },
+                    scales: { x: axisX, y: { beginAtZero: true, title: { display: true, text: "Calls" }, ...fixWidth } },
+                },
+            });
+
+            drawChart("errChart", {
+                type: "bar",
+                data: {
+                    labels,
+                    datasets: [{ label: "Forecast − real", data: items.map((i) => i.predicted - i.actual), backgroundColor: items.map((i) => (i.predicted >= i.actual ? css("--over") : css("--under"))) }],
+                },
+                options: {
+                    maintainAspectRatio: false, onClick, onHover,
+                    plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => `Error: ${signed(c.parsed.y)}` } } },
+                    scales: { x: axisX, y: { title: { display: true, text: "Error (calls)" }, ...fixWidth } },
+                },
+            });
+        }
+
+        function renderTable(level, items) {
+            const first = { month: "Month", week: "Week", day: "Day", interval: "Time" }[level];
+            const wapeLabel = { month: "Daily error", week: "Daily error", day: "Interval error", interval: "" }[level];
+            $("tHead").innerHTML = `<th>${first}</th><th>Real</th><th>Forecast</th><th>Error</th><th>Error %</th>` + (wapeLabel ? `<th>${wapeLabel}</th>` : "");
+            const worstIndex = items.reduce((best, it, i) => (Math.abs(it.predicted - it.actual) > Math.abs(items[best].predicted - items[best].actual) ? i : best), 0);
+            $("tBody").innerHTML = items.map((it, i) => {
+                const err = it.predicted - it.actual;
+                const p = pct(err, it.actual);
+                return `<tr class="${it.drill ? "row-drill" : ""} ${i === worstIndex && err !== 0 ? "worst" : ""}" data-i="${i}">`
+                    + `<td>${it.label}${tagHtml(it.tag)}</td><td>${it.actual.toLocaleString()}</td><td>${it.predicted.toLocaleString()}</td>`
+                    + `<td>${signed(err)}</td><td style="${shade(err, p)}">${fmtPct(p)}</td>`
+                    + (wapeLabel ? `<td>${fmtPct(it.wape, false)}</td>` : "") + "</tr>";
+            }).join("");
+            $("tBody").querySelectorAll("tr.row-drill").forEach((tr) => tr.addEventListener("click", () => drill(Number(tr.dataset.i))));
+            $("tableNote").textContent = {
+                month: "Error = forecast minus real. 'Daily error' adds up each day's miss ignoring direction, so it can be large even when the month total is close (high and low days cancel out). Click a row to see its weeks.",
+                week: "Weeks run Monday to Sunday and are cut at month edges. Click a row to see its days.",
+                day: "'Interval error' adds up each half-hour's miss ignoring direction; it is always high at low call volumes. Click a row to see its half-hours.",
+                interval: "Each row is one half-hour. Calls are whole numbers, so small gaps here are mostly chance.",
+            }[level];
+        }
+
+        function statsRow(label, days) {
+            const actual = sum(days, (d) => d.actual);
+            const predicted = sum(days, (d) => d.predicted);
+            const err = predicted - actual;
+            const p = pct(err, actual);
+            return `<tr><td>${label}</td><td>${days.length}</td><td>${actual.toLocaleString()}</td><td>${predicted.toLocaleString()}</td>`
+                + `<td>${signed(err)}</td><td style="${shade(err, p)}">${fmtPct(p)}</td><td>${fmtPct(pct(sum(days, (d) => Math.abs(d.predicted - d.actual)), actual), false)}</td></tr>`;
+        }
+
+        function renderInsights(level) {
+            $("insights").style.display = level === "interval" ? "none" : "block";
+            $("hoursCard").style.display = "block";
+            $("weekdayTitle").textContent = "By day of week";
+            $("weekdayHint").textContent = "Shows whether the forecast is consistently off on particular weekdays.";
+            $("typeTitle").textContent = "Normal days vs holidays and events";
+            $("typeHint").textContent = "Holidays are US federal holidays plus Thanksgiving eve/after and Christmas/New Year's eve. Events are the one-off spikes in the real year.";
+            $("missTitle").textContent = "Ten largest misses in view";
+            $("missHint").textContent = "Click a row to open that day's half-hour view.";
+            if (level === "interval") return;
+            const days = scopeDays();
+            const head = (first) => `<tr><th>${first}</th><th>Days</th><th>Real</th><th>Forecast</th><th>Error</th><th>Error %</th><th>Daily error</th></tr>`;
+
+            $("weekdayTable").innerHTML = head("Weekday")
+                + WEEK_ORDER.map((dow) => [DAYS[dow], days.filter((d) => d.dow === dow)]).filter(([, ds]) => ds.length).map(([n, ds]) => statsRow(n, ds)).join("");
+            const special = days.filter((d) => d.tag);
+            $("typeTable").innerHTML = head("Day type")
+                + statsRow("Normal days", days.filter((d) => !d.tag))
+                + (special.length ? statsRow("Holidays and events", special) : "");
+
+            const hours = new Map();
+            for (const d of days) {
+                (state.slots.get(d.date) || []).forEach((s, i) => {
+                    const h = Math.floor((i * DATA.interval_minutes) / 60);
+                    const e = hours.get(h) || { a: 0, p: 0 };
+                    e.a += s.actual; e.p += s.predicted;
+                    hours.set(h, e);
+                });
+            }
+            const live = [...hours].filter(([, e]) => e.a || e.p).sort((a, b) => a[0] - b[0]);
+            drawChart("hourChart", {
+                type: "bar",
+                data: {
+                    labels: live.map(([h]) => `${String(h).padStart(2, "0")}:00`),
+                    datasets: [
+                        { label: "Real calls", data: live.map(([, e]) => e.a), backgroundColor: css("--actual") },
+                        { label: "Forecast", data: live.map(([, e]) => e.p), backgroundColor: css("--predicted") },
+                    ],
+                },
+                options: {
+                    maintainAspectRatio: false,
+                    interaction: { mode: "index", intersect: false },
+                    plugins: { tooltip: { callbacks: { footer: (ctx) => { const e = live[ctx[0].dataIndex][1]; return `Error: ${signed(e.p - e.a)} (${fmtPct(pct(e.p - e.a, e.a))})`; } } } },
+                    scales: { y: { beginAtZero: true, title: { display: true, text: "Calls" } } },
+                },
+            });
+
+            const worst = [...days].sort((a, b) => Math.abs(b.predicted - b.actual) - Math.abs(a.predicted - a.actual)).slice(0, 10);
+            $("missTable").innerHTML = "<tr><th>Day</th><th>Real</th><th>Forecast</th><th>Error</th><th>Error %</th></tr>"
+                + worst.map((d) => {
+                    const err = d.predicted - d.actual;
+                    const p = pct(err, d.actual);
+                    return `<tr class="row-drill" data-date="${d.date}"><td>${shortDate(d.date)} ${d.date.slice(0, 4)}${tagHtml(d.tag)}</td><td>${d.actual.toLocaleString()}</td>`
+                        + `<td>${d.predicted.toLocaleString()}</td><td>${signed(err)}</td><td style="${shade(err, p)}">${fmtPct(p)}</td></tr>`;
+                }).join("");
+            $("missTable").querySelectorAll("tr.row-drill").forEach((tr) => tr.addEventListener("click", () => jumpToDay(tr.dataset.date)));
+        }
+
+        // ---- agents-per-shift view ----
+        function agentItem(key, label, rows, drill, tag) {
+            const busy = rows.filter((r) => r.needed > 0);
+            const share = (field) => (busy.length ? (100 * busy.filter((r) => r[field] >= r.needed).length) / busy.length : null);
+            return {
+                key, label, rows, drill, tag,
+                needed: sum(rows, (r) => r.needed), planned: sum(rows, (r) => r.planned), old: sum(rows, (r) => r.old),
+                covered: share("planned"), oldCovered: share("old"),
+                short: sum(rows, (r) => Math.max(r.needed - r.planned, 0)), oldShort: sum(rows, (r) => Math.max(r.needed - r.old, 0)),
+                extra: sum(rows, (r) => Math.max(r.planned - r.needed, 0)),
+            };
+        }
+
+        const rowsOfDays = (days) => days.flatMap((d) => state.shiftRows.get(d.date) || []);
+        const coverShade = (c) => (c === null ? "" : `background:rgba(var(--under-rgb),${((100 - c) / 100) * 0.5})`);
+
+        function buildAgentItems() {
+            if (path.day) {
+                const rows = state.shiftRows.get(path.day) || [];
+                return { level: "shift", items: rows.map((r) => agentItem(SHIFT_NAMES[r.code], SHIFT_NAMES[r.code], [r], false, "")) };
+            }
+            if (path.week) {
+                return { level: "day", items: scopeDays().map((d) => agentItem(d.date, shortDate(d.date), rowsOfDays([d]), true, d.tag || "")) };
+            }
+            const groups = new Map();
+            for (const d of scopeDays()) {
+                const key = path.month ? weekStart(d.date) : d.date.slice(0, 7);
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(d);
+            }
+            if (path.month) {
+                return { level: "week", items: [...groups].map(([w, ds]) =>
+                    agentItem(w, `${rangeDate(ds[0].date)} – ${rangeDate(ds[ds.length - 1].date)}`, rowsOfDays(ds), true, "")) };
+            }
+            return { level: "month", items: [...groups].map(([m, ds]) => agentItem(m, monthLabel(m), rowsOfDays(ds), true, "")) };
+        }
+
+        function renderAgentHeadline() {
+            const p = DATA.policy;
+            const tiles = [
+                ["Coverage target", p.coverage_percent === null ? "none" : `${p.coverage_percent}%`, "share of shifts to cover"],
+                ["Night minimum", `${p.night_minimum_agents} agents`, "00:00-08:00, every night"],
+                ["Weekend minimum", `${p.weekend_minimum_agents} agents`, "Saturday and Sunday day shifts"],
+                ["Service target", `${p.target_service_level}% in ${p.target_seconds}s`, `shrinkage ${p.shrinkage}%`],
+            ];
+            $("headline").innerHTML = tiles.map(([k, v, s]) => `<div class="tile"><span>${k}</span><b>${v}</b><small>${s}</small></div>`).join("");
+        }
+
+        function renderAgentTiles(items) {
+            const all = agentItem("all", "All", items.flatMap((i) => i.rows), false, "");
+            const tiles = [
+                ["Agents needed (real calls)", all.needed.toLocaleString(), "agent-shifts"],
+                ["Agents planned", all.planned.toLocaleString(), `old rule: ${all.old.toLocaleString()}`],
+                ["Shifts covered", fmtPct(all.covered, false), `old rule: ${fmtPct(all.oldCovered, false)}`],
+                ["Agent-shifts short", all.short.toLocaleString(), `old rule: ${all.oldShort.toLocaleString()}`],
+                ["Extra agent-shifts", all.extra.toLocaleString(), `${fmtPct(pct(all.extra, all.needed), false)} of needed`],
+            ];
+            $("tiles").innerHTML = tiles.map(([k, v, s]) => `<div class="tile"><span>${k}</span><b>${v}</b><small>${s}</small></div>`).join("");
+        }
+
+        function renderAgentCharts(level, items) {
+            const labels = items.map((i) => i.label + (level === "day" && i.tag ? " ★" : ""));
+            const clickable = level !== "shift";
+            const line = (label, key, colour, extra = {}) => ({ label, data: items.map((i) => i[key]), borderColor: css(colour), backgroundColor: css(colour), borderWidth: 2, pointRadius: 3, tension: 0.15, ...extra });
+            const datasets = [
+                line("Agents needed (real calls)", "needed", "--actual"),
+                line("Agents planned", "planned", "--predicted"),
+                line("Old rule (plain forecast)", "old", "--baseline", { borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0 }),
+            ];
+            const onClick = (evt, _els, chart) => {
+                const hit = chart.getElementsAtEventForMode(evt.native, "index", { intersect: false }, false);
+                if (hit.length) drill(hit[0].index);
+            };
+            const onHover = (evt, els) => { evt.native.target.style.cursor = clickable && els.length ? "pointer" : "default"; };
+            const axisX = { ticks: { maxTicksLimit: 16, autoSkip: true } };
+            const fixWidth = { afterFit: (scale) => { scale.width = 64; } };
+
+            drawChart("mainChart", {
+                type: "line",
+                data: { labels, datasets },
+                options: {
+                    maintainAspectRatio: false, onClick, onHover,
+                    interaction: { mode: "index", intersect: false },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                footer: (ctx) => {
+                                    const it = items[ctx[0].dataIndex];
+                                    return `Shifts covered: ${fmtPct(it.covered, false)} (old rule ${fmtPct(it.oldCovered, false)})\nShort ${it.short}, extra ${it.extra}` + (it.tag ? `\n${it.tag}` : "");
+                                },
+                            },
+                        },
+                    },
+                    scales: { x: axisX, y: { beginAtZero: true, title: { display: true, text: "Agent-shifts" }, ...fixWidth } },
+                },
+            });
+            drawChart("errChart", {
+                type: "bar",
+                data: {
+                    labels,
+                    datasets: [{ label: "Planned − needed", data: items.map((i) => i.planned - i.needed), backgroundColor: items.map((i) => (i.planned >= i.needed ? css("--over") : css("--under"))) }],
+                },
+                options: {
+                    maintainAspectRatio: false, onClick, onHover,
+                    plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => `Planned − needed: ${signed(c.parsed.y)}` } } },
+                    scales: { x: axisX, y: { title: { display: true, text: "Planned − needed" }, ...fixWidth } },
+                },
+            });
+        }
+
+        function renderAgentTable(level, items) {
+            const first = { month: "Month", week: "Week", day: "Day", shift: "Shift" }[level];
+            $("tHead").innerHTML = `<th>${first}</th><th>Needed</th><th>Planned</th><th>Old rule</th><th>Planned − needed</th><th>Shifts covered</th><th>Short</th><th>Extra</th>`;
+            $("tBody").innerHTML = items.map((it, i) => {
+                const diff = it.planned - it.needed;
+                return `<tr class="${it.drill ? "row-drill" : ""}" data-i="${i}"><td>${it.label}${tagHtml(it.tag)}</td><td>${it.needed.toLocaleString()}</td>`
+                    + `<td>${it.planned.toLocaleString()}</td><td>${it.old.toLocaleString()}</td><td style="${shade(diff, pct(diff, it.needed))}">${signed(diff)}</td>`
+                    + `<td style="${coverShade(it.covered)}">${fmtPct(it.covered, false)}</td><td>${it.short.toLocaleString()}</td><td>${it.extra.toLocaleString()}</td></tr>`;
+            }).join("");
+            $("tBody").querySelectorAll("tr.row-drill").forEach((tr) => tr.addEventListener("click", () => drill(Number(tr.dataset.i))));
+            $("tableNote").textContent = {
+                month: "Short = agents the real calls needed that the plan did not schedule, added up over the month's shifts. Extra = agents scheduled beyond need (including minimums on shifts with no calls). Click a row to see its weeks.",
+                week: "Weeks run Monday to Sunday and are cut at month edges. Click a row to see its days.",
+                day: "Each day has three shifts: night, morning and evening. Click a row to see them.",
+                shift: "One row per shift. 'Shifts covered' is 100% when the plan schedules at least the agents needed, 0% when it is short, and blank when no calls came in.",
+            }[level];
+        }
+
+        function renderAgentInsights(level, items) {
+            $("insights").style.display = level === "shift" ? "none" : "block";
+            if (level === "shift") return;
+            $("hoursCard").style.display = "none";
+            $("weekdayTitle").textContent = "By day of week";
+            $("weekdayHint").textContent = "Weekends have few calls but the minimum applies, so they show extra agents rather than shortfalls.";
+            $("typeTitle").textContent = "By shift";
+            $("typeHint").textContent = "Night shifts mostly have no calls at all; the minimum covers the nights that do get one.";
+            $("missTitle").textContent = "Ten days furthest short in view";
+            $("missHint").textContent = "Short = agents needed that the plan did not schedule, over the day's three shifts. Click a row to open that day.";
+            const rows = items.flatMap((i) => i.rows);
+            const head = (first) => `<tr><th>${first}</th><th>Shifts</th><th>Needed</th><th>Planned</th><th>Covered</th><th>Short</th><th>Extra</th></tr>`;
+            const line = (label, it) => `<tr><td>${label}</td><td>${it.rows.length}</td><td>${it.needed.toLocaleString()}</td><td>${it.planned.toLocaleString()}</td>`
+                + `<td style="${coverShade(it.covered)}">${fmtPct(it.covered, false)}</td><td>${it.short.toLocaleString()}</td><td>${it.extra.toLocaleString()}</td></tr>`;
+            $("typeTable").innerHTML = head("Shift") + SHIFT_NAMES.map((name, code) => line(name, agentItem(code, name, rows.filter((r) => r.code === code), false, ""))).join("");
+            $("weekdayTable").innerHTML = head("Weekday") + WEEK_ORDER.map((dow) => [DAYS[dow], rows.filter((r) => utc(r.date).getUTCDay() === dow)])
+                .filter(([, list]) => list.length).map(([name, list]) => line(name, agentItem(name, name, list, false, ""))).join("");
+
+            const byDay = new Map();
+            for (const r of rows) {
+                if (!byDay.has(r.date)) byDay.set(r.date, []);
+                byDay.get(r.date).push(r);
+            }
+            const worst = [...byDay].map(([date, list]) => agentItem(date, date, list, true, "")).filter((d) => d.short > 0)
+                .sort((a, b) => b.short - a.short || (a.key < b.key ? -1 : 1)).slice(0, 10);
+            $("missTable").innerHTML = "<tr><th>Day</th><th>Needed</th><th>Planned</th><th>Short</th><th>Shifts covered</th></tr>"
+                + worst.map((d) => `<tr class="row-drill" data-date="${d.key}"><td>${shortDate(d.key)} ${d.key.slice(0, 4)}${tagHtml((state.days.find((x) => x.date === d.key) || {}).tag)}</td>`
+                    + `<td>${d.needed}</td><td>${d.planned}</td><td>${d.short}</td><td style="${coverShade(d.covered)}">${fmtPct(d.covered, false)}</td></tr>`).join("");
+            $("missTable").querySelectorAll("tr.row-drill").forEach((tr) => tr.addEventListener("click", () => jumpToDay(tr.dataset.date)));
+        }
+
+        function setMode(mode) {
+            state.mode = mode;
+            path.month = path.week = path.day = null;
+            for (const [id, name] of [["modeCalls", "calls"], ["modeAgents", "agents"]]) {
+                $(id).classList.toggle("active", mode === name);
+                $(id).setAttribute("aria-pressed", String(mode === name));
+            }
+            $("modeNote").textContent = NOTES[mode];
+            document.querySelector("h1").textContent = mode === "calls" ? "Forecast vs Real Calls" : "Agents per Shift: Plan vs Needed";
+            render();
+        }
+
+        function render() {
+            if (state.mode === "agents") {
+                current = buildAgentItems();
+                renderCrumbs();
+                renderAgentHeadline();
+                renderAgentTiles(current.items);
+                renderAgentCharts(current.level, current.items);
+                renderAgentTable(current.level, current.items);
+                renderAgentInsights(current.level, current.items);
+                return;
+            }
+            current = buildItems();
+            renderCrumbs();
+            renderHeadline();
+            renderTiles(current.level, current.items);
+            renderCharts(current.level, current.items);
+            renderTable(current.level, current.items);
+            renderInsights(current.level);
+        }
+
+        if (!DATA) {
+            $("fatal").style.display = "block";
+            $("app").style.display = "none";
+        } else {
+            Chart.defaults.animation = false;
+            Chart.defaults.color = css("--muted");
+            Chart.defaults.borderColor = css("--border");
+            $("subtitle").textContent = `Forecast trained on the mirrored years (${DATA.split.train_start} to ${DATA.split.train_end}), compared with the real calls from ${DATA.split.test_start} to ${DATA.split.test_end}.`;
+            load();
+            $("modeCalls").addEventListener("click", () => setMode("calls"));
+            $("modeAgents").addEventListener("click", () => setMode("agents"));
+            setMode("calls");
+        }
+    </script>
+</body>
+
+</html>

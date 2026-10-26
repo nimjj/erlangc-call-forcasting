@@ -1,8 +1,10 @@
 from __future__ import annotations
 import math
 import re
+import numpy as np
 import pandas as pd
 from app.core.constants import SHIFT_DEFINITIONS
+from app.core.queuing.peak_staffing import simulate_shift_agents
 
 def shift_definitions(start_times: list[str] | None = None) -> list[dict]:
     if start_times is None:
@@ -32,7 +34,21 @@ def build_shift_requirements(
     year: int | None = None,
     month: int | None = None,
     shift_start_times: list[str] | None = None,
+    coverage_percent: float | None = None,
+    night_minimum_agents: int = 0,
+    weekend_minimum_agents: int = 0,
+    target_seconds: float = 20,
+    target_service_level: float = 80,
+    shrinkage: float = 30,
+    max_agents: int = 1000,
 ) -> pd.DataFrame:
+    """Agents required per shift.
+
+    Without coverage_percent a shift needs the largest scheduled_agents among its intervals.
+    With it, the shift is sized so that share of simulated shifts is fully covered (see
+    app.core.queuing.peak_staffing); this needs call_volume and aht_seconds in the forecast.
+    The minimums then raise night shifts and weekend day shifts to at least that many agents.
+    """
 
     if forecast.empty:
         raise ValueError("Forecast is empty.")
@@ -67,7 +83,16 @@ def build_shift_requirements(
     frame["date"] = frame["interval_start"].dt.date
     frame["hour"] = frame["interval_start"].dt.hour
 
+    if coverage_percent is not None:
+        missing = {"call_volume", "aht_seconds"} - set(all_intervals.columns)
+        if missing:
+            raise ValueError(
+                f"Forecast is missing {sorted(missing)}, which coverage_percent needs; "
+                "send the full forecast rows or set coverage_percent to null."
+            )
+
     rows = []
+    shift_frames = []
 
     for date_value, day_frame in frame.groupby("date"):
         for shift in definitions:
@@ -77,6 +102,7 @@ def build_shift_requirements(
                 (all_intervals["interval_start"] < end)
                 & (all_intervals["interval_end"] > start)
             ]
+            shift_frames.append(shift_frame)
 
             required_agents = (
                 int(shift_frame["scheduled_agents"].max())
@@ -97,7 +123,31 @@ def build_shift_requirements(
                 }
             )
 
-    return pd.DataFrame(rows)
+    requirements = pd.DataFrame(rows)
+
+    if coverage_percent is not None:
+        has_intervals = np.array([not shift_frame.empty for shift_frame in shift_frames])
+        if has_intervals.any():
+            used = [shift_frame for shift_frame in shift_frames if not shift_frame.empty]
+            sizes = [len(shift_frame) for shift_frame in used]
+            combined = pd.concat(used)
+            requirements.loc[has_intervals, "required_agents"] = simulate_shift_agents(
+                volume=combined["call_volume"].to_numpy(),
+                aht_seconds=combined["aht_seconds"].to_numpy(),
+                group_starts=np.cumsum([0] + sizes[:-1]),
+                coverage_percent=float(coverage_percent),
+                interval_seconds=int(interval.total_seconds()),
+                target_seconds=float(target_seconds),
+                target_service_level=float(target_service_level),
+                shrinkage=float(shrinkage),
+                max_agents=int(max_agents),
+            )
+
+    is_night = requirements["shift_code"] == "NIGHT"
+    is_weekend_day = ~is_night & (requirements["date"].dt.dayofweek >= 5)
+    requirements.loc[is_night, "required_agents"] = requirements.loc[is_night, "required_agents"].clip(lower=int(night_minimum_agents))
+    requirements.loc[is_weekend_day, "required_agents"] = requirements.loc[is_weekend_day, "required_agents"].clip(lower=int(weekend_minimum_agents))
+    return requirements
 
 def calculate_schedule_headcount(
     shift_requirements: pd.DataFrame,

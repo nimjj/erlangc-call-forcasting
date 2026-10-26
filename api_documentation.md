@@ -1,6 +1,6 @@
 # API Documentation — CDR STL Forecast & Agent Scheduling API
 
-**Version:** `4.3.0`
+**Version:** `4.4.0`
 
 **Default base URL:** `http://127.0.0.1:8000`
 
@@ -49,7 +49,7 @@ Otherwise the fallback response is service information similar to:
 ```json
 {
   "status": "healthy",
-  "version": "4.3.0"
+  "version": "4.4.0"
 }
 ```
 
@@ -194,8 +194,8 @@ The interval STL models one seasonal period and has no yearly component. These a
 With `annual_seasonality=auto` (default) and a historical span of at least 365 days, `app/core/forecasting/annual.py` forecasts daily totals on a `log1p` scale instead:
 
 1. Robust weekly STL (period 7) on daily totals, refitted after replacing US holidays and outlier days with fitted values.
-2. An annual Fourier curve over day of year (2 harmonics for 1-2 years of history, 4 for 2+ years), fitted jointly with a linear spline trend with one knot per year.
-3. A linear trend over the last `trend_lookback_days` of the deseasonalised series, damped by 0.9 per week; the level is calibrated to reproduce the last 28 training days' call total.
+2. An annual Fourier curve over day of year (2 harmonics for 1-2 years of history, 3 for 2+ years), fitted jointly with a linear spline trend with one knot per year.
+3. A linear trend over the last `trend_lookback_days` of the deseasonalised series, damped by 0.6 per week; the level is calibrated to reproduce the last 28 training days' call total.
 4. Holiday multipliers learned from past occurrences of each observed US federal holiday, Thanksgiving eve, the day after Thanksgiving, Christmas Eve and New Year's Eve, blended with class defaults.
 5. Each day split into intervals with the weekday's intraday profile from the last 26 weeks; largest-remainder rounding keeps interval counts summing to the daily total.
 
@@ -573,8 +573,8 @@ Send the forecast rows returned by the sync endpoint or result.forecast from a c
 ```json
 {
   "forecast": [
-    {"interval_start": "2026-09-01T06:00:00", "scheduled_agents": 2},
-    {"interval_start": "2026-09-01T06:30:00", "scheduled_agents": 3}
+    {"interval_start": "2026-09-01T06:00:00", "call_volume": 3, "aht_seconds": 640.0, "scheduled_agents": 5},
+    {"interval_start": "2026-09-01T06:30:00", "call_volume": 2, "aht_seconds": 640.0, "scheduled_agents": 3}
   ],
   "year": 2026,
   "month": 9,
@@ -589,11 +589,15 @@ This small example demonstrates the request format. Supply the complete forecast
 
 | Field | Type | Validation |
 |---|---|---|
-| forecast | array | 1-40,000 rows containing interval_start and scheduled_agents |
+| forecast | array | 1-40,000 rows containing interval_start, scheduled_agents, and (unless coverage_percent is null) call_volume and aht_seconds |
 | year | integer | Required |
 | month | integer | 1-12 |
 | agent_count | integer/null | Optional; 1-10,000 and at least the estimated minimum; null calculates it |
 | shift_start_times | array of strings/null | Optional; exactly three HH:MM times, eight hours apart in shift order |
+| coverage_percent | number/null | Default 80; 50-99. Share of shifts to cover fully; null uses the largest scheduled_agents per shift |
+| night_minimum_agents | integer | Default 3; 0-10,000. Minimum agents on the night shift |
+| weekend_minimum_agents | integer | Default 3; 0-10,000. Minimum agents on Saturday and Sunday day shifts |
+| target_seconds, target_service_level, shrinkage | numbers | Defaults 20, 80, 30. Use the values the forecast was made with |
 
 Save the JSON above as schedule-request.json, then run:
 
@@ -615,9 +619,21 @@ Each shift lasts exactly eight hours. Defaults are 00:00, 08:00 and 16:00. With 
 
 Codes remain stable identifiers even when custom times change their time of day. For example, 06:15, 14:15 and 22:15 are valid. Times that overlap or leave gaps, such as 06:00, 14:00 and 23:00, return HTTP 400. A list with a length other than three fails request validation with HTTP 422.
 
-An overnight assignment belongs to its start date. Required agents are the peak scheduled_agents over forecast intervals overlapping the full shift, including the next date when supplied. At a forecast boundary only available intervals can be evaluated; the first date's early hours belong to the previous date's overnight assignment.
+An overnight assignment belongs to its start date. Required agents come from the forecast intervals overlapping the full shift (see Shift staffing), including the next date when supplied. At a forecast boundary only available intervals can be evaluated; the first date's early hours belong to the previous date's overnight assignment.
 
 summary.shifts reports code, name, start_hour, end_hour and label for all three shifts. end_hour can exceed 24 for overnight shifts. Schedule rows use the configured time range in shift.
+
+## Shift staffing
+
+By default each shift is sized to the busiest interval it is likely to see, not to the average forecast. A shift needs the Erlang C agents for its busiest interval, and the busiest interval of a day is usually busier than the forecast average, so staffing from the point forecast covers only about half of all shifts (55% in the mirrored-data test; 51% over rolling monthly folds).
+
+With `coverage_percent` set (default 80), every shift is simulated 300 times: call counts are Poisson around the forecast `call_volume`, with a small day-level variation for forecast error, converted to agents with Erlang C using the forecast `aht_seconds`, `target_seconds`, `target_service_level` and `shrinkage`. The shift requires the agents that cover `coverage_percent` of those simulated shifts. Results are repeatable: the simulation uses a fixed seed.
+
+`night_minimum_agents` and `weekend_minimum_agents` (both default 3) then raise the night shift, and the day shifts on Saturday and Sunday, to at least that many agents, because a single call needs 3 agents at the default targets and a quiet shift cannot be forecast by call count alone. Set a minimum to 0 to turn it off.
+
+Send `coverage_percent: null`, `night_minimum_agents: 0` and `weekend_minimum_agents: 0` to get the previous rule, which needs only `scheduled_agents`: each shift requires the largest `scheduled_agents` among its intervals.
+
+Measured on the mirrored-data test (trained on the mirrored years, planned for the real year), the defaults covered about 93% of shifts with demand (about 94% over rolling monthly folds) against 55% before, at the price of roughly 45% more agent-shifts than the bare minimum, about two thirds of which are the minimums on shifts that had no calls. `tools/shift_coverage_check.py` reproduces these figures; raise or lower `coverage_percent` to trade cover for cost.
 
 ## Headcount model
 
