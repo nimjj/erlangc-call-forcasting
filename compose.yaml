@@ -8,6 +8,9 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Resource limits keep one oversized upload from taking the host down.
+    mem_limit: ${APP_MEM_LIMIT:-2g}
+    pids_limit: 256
     ports:
       - "127.0.0.1:${APP_PORT:-8000}:8000"
     environment:
@@ -16,6 +19,12 @@ services:
       - app-logs:/app/logs
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=512m,mode=1777
+    # Container output is rotated so Docker's own log file cannot grow without limit.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     stop_grace_period: 30s
 
 volumes:

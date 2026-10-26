@@ -417,7 +417,7 @@ Streams server-sent events as `text/event-stream` when progress or status change
 
 # POST `/api/v1/cdr/backtest`
 
-Measures forecast accuracy on held-out data. Records before `train_end` are used for training, and the forecast for the remaining days is compared with the calls that actually arrived and with simple baselines. The standalone page in `backtest-ui/` calls this endpoint; see the README section "Testing with the backtest page".
+Measures forecast accuracy on held-out data. Records before `train_end` are used for training, and the forecast for the remaining days is compared with the calls that actually arrived and with simple baselines. The standalone page in `backtest-ui/` calls this endpoint; see the README section "Checking quality".
 
 The request is synchronous. It returns the full result in one response and runs on a worker thread, so other requests stay responsive while it computes.
 
