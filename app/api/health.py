@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
-from fastapi.responses import FileResponse
-from app.config import STATIC_DIR
 
-router = APIRouter(tags=["Health & Dashboard"])
+router = APIRouter(tags=["Health & Service Info"])
 
 @router.get("/")
-def dashboard():
-    index_path = STATIC_DIR / "index.html"
-    if index_path.exists():
-        return FileResponse(index_path)
+def root() -> dict:
     return {
         "message": "CDR STL Forecast & Agent Scheduling API",
         "documentation": "/docs",

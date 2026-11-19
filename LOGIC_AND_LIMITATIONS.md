@@ -49,12 +49,12 @@ expected calls on a day  =  level  ×  weekday factor  ×  time-of-year factor  
 - **Weekday factor.** Mondays to Fridays are busy, weekends are very quiet. It is learned with STL (a robust method that splits a series into trend, repeating pattern and leftovers), after replacing holidays and unusual days with typical values so they do not distort the pattern.
 - **Time-of-year factor.** A smooth yearly curve (three waves with two or more years of history, two with less), fitted together with a trend that may bend once per year. Fitting both together stops a quiet season from being mistaken for a decline.
 - **Level and trend.** The recent level, with a slope that fades quickly (it loses 40% of its strength each week, so it flattens within about a month instead of running away over a year). The level is then scaled so the model reproduces the call total of the last 28 days.
-- **Holiday factor.** US federal holidays, plus Thanksgiving eve and the day after, Christmas Eve and New Year's Eve. Each holiday's effect is learned from earlier years and blended with a default for its type (closed days about 0.15, reduced days 0.6, the day before Thanksgiving 1.6).
+- **Holiday factor.** US federal holidays, plus Thanksgiving eve and the day after, Christmas Eve and New Year's Eve. Each holiday's effect is learned from how that holiday behaved in the uploaded history (its volume compared with a normal day). A holiday the history never shows is not adjusted at all. The model knows the date of each holiday but not how your centre treats it, so it does not guess: a normal Christmas in the history gives a normal Christmas in the forecast, and a dip in the history gives a dip.
 - **Splitting the day.** The daily total is divided across half-hours using that weekday's typical shape over the last 26 weeks, and rounded to whole calls that add up to the daily total.
 
 One-off events (an outage, a storm) are ignored when learning the pattern and are not predicted.
 
-The weekly model (14 to 364 days) is simpler: fit trend plus weekly pattern to every half-hour, draw a straight line through the recent trend, and repeat the last week's pattern forward. The rolling-profile fallback averages earlier days chosen by weekday and position in the month.
+The weekly model (14 to 364 days) is simpler: fit trend plus weekly pattern to every half-hour, draw a straight line through the recent trend, and repeat the last week's pattern forward. Because the fit is robust, it treats the occasional call in a quiet half-hour as noise, which left sparse nights well under their real average (about 1.4 calls a night forecast against 3.4 in the history). The average of what it set aside, per half-hour of the week over the last 8 weeks, is added back; each piece is capped at four Poisson standard deviations of that half-hour, so a one-off burst does not repeat every week. The rolling-profile fallback averages earlier days chosen by weekday and position in the month.
 
 ### 2.4 Which period gets forecast
 
@@ -84,6 +84,8 @@ Example: 5 calls in 30 minutes, each about 11 minutes (670 s): 5 × 670 ÷ 1800 
 **Step 2: agents on the phones.** Find the smallest number of agents for which the target is met (default: 80% of calls answered within 20 seconds). You always need more agents than the traffic, because calls arrive at random and sometimes queue. For 1.86 Erlangs, 4 agents give about 87%, 3 would not meet the target.
 
 **Step 3: shrinkage.** Agents on the roster are not all available (breaks, training, absence). With 30% shrinkage, divide by 0.7 and round up: 4 ÷ 0.7 = 5.7, so **6 agents rostered**.
+
+**Occupancy cap.** Agents who spend nearly all their time on calls burn out and answer slower than the maths assumes, so the agents in step 2 are also limited by `max_occupancy` (default 85%, the share of an agent's time that may go to calls). When the service target alone would need fewer agents than that cap allows, the cap adds agents on busy half-hours. Quiet half-hours are not affected. Send `max_occupancy=100` for no cap. The monthly schedule takes the same field, and should be sent the value the forecast used.
 
 With a 670 s call and the default targets, the staircase from calls in a half-hour to agents rostered is:
 
@@ -188,7 +190,7 @@ Coverage by type, current default: night 98%, morning 95%, evening 88%; weekdays
 |---|---|---|---|
 | L10 | One-off events are not predicted | Event days were about 32% too low in the test | Provide known events by raising coverage manually |
 | L11 | Trend fades quickly (flat within about a month) | Strong, lasting growth or decline is missed until the next refit | Refit regularly with fresh data |
-| L12 | Holiday effects for rarely seen holidays use defaults | A holiday seen once is learned only partly | Review holiday days by hand |
+| L12 | Holiday effects come from the history alone | A holiday seen once is forecast as it behaved that once; one never seen is not adjusted, so a closure the history does not show is missed | Review holiday days by hand; add history that covers them |
 | L13 | Weekends are poorly forecast (65% daily error) | Few calls, but the percentage is large | The weekend minimum covers this |
 | L14 | Timestamps carry no time zone | Daylight-saving changes and exports from different zones are not handled | Export in one local time zone |
 | L15 | Missing dates are read as zero calls | A skipped export looks like a day without demand | Check uploads cover the full period |
@@ -215,7 +217,7 @@ Coverage by type, current default: night 98%, morning 95%, evening 88%; weekdays
 | Goal | How |
 |---|---|
 | Is a running deployment working? | `python tools/smoke_test.py` |
-| How good is the call forecast on my data? | Backtest page (`backtest-ui/`), or `POST /api/v1/cdr/backtest` |
+| How good is the call forecast on my data? | `POST /api/v1/cdr/backtest` |
 | Do the shifts get covered? | `python tools/shift_coverage_check.py --data <combined CDR file>` (needs a file with earlier history and a test period) |
 | Where does it miss, month by month, day by day, shift by shift? | `python tools/build_comparison_page.py`, then open the page it writes |
 | Which settings to change? | Raise `coverage_percent` for cover, lower it or a minimum for cost, then rerun the shift check |

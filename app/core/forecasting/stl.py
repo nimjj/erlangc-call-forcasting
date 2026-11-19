@@ -7,12 +7,19 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.seasonal import STL
 
+from app.config import MAX_FORECAST_ROWS, MAX_HISTORY_DAYS, MAX_HISTORY_INTERVALS
 from app.core.constants import FORECAST_COLUMNS
+from app.core.forecasting.aggregates import weighted_kpis
 from app.core.forecasting.annual import MIN_ANNUAL_HISTORY_DAYS, predict_annual
 from app.core.ingestion.reader import read_cdr_csv
 from app.core.ingestion.cleaner import preprocess_cdr, clean_percent
 from app.core.ingestion.interval import build_cdr_intervals
 from app.core.queuing.staffing import compute_interval_staffing
+
+# Recent seasonal cycles whose residuals are added back to the weekly STL forecast.
+RESIDUAL_BIAS_CYCLES = 8
+# Residuals beyond this many Poisson standard deviations of the fitted level are not added back.
+RESIDUAL_BIAS_SIGMAS = 4.0
 
 
 def _profile_for_day(frame: pd.DataFrame, day: pd.Timestamp, intervals_per_day: int) -> np.ndarray:
@@ -73,7 +80,40 @@ def _predict_day_profile(
         ]
         source_days = same_year_period or same_month or prior_days[-366:]
 
-    return np.rint(np.mean([profiles[profile_day] for profile_day in source_days], axis=0)).astype(int)
+    return np.mean([profiles[profile_day] for profile_day in source_days], axis=0)
+
+
+def _round_per_day(values: np.ndarray, intervals_per_day: int) -> np.ndarray:
+    """Whole calls per interval that follow the expected calls through each day.
+
+    Rounding every interval on its own turns a quiet night of 0.2 calls per interval into 0 calls, and so
+    0 agents. Rounding the running total instead keeps each day's total and puts a call in every few
+    quiet intervals, about where they are expected.
+    """
+    days = np.maximum(np.asarray(values, dtype=float), 0).reshape(-1, intervals_per_day)
+    running = np.floor(np.cumsum(days, axis=1) + 0.5)
+    return np.diff(running, axis=1, prepend=0).astype(np.int64).reshape(-1)
+
+
+def _fill_missing_days(series: pd.Series, observed_days: set, intervals_per_day: int) -> tuple[pd.Series, int]:
+    """Days with no records at all are an export gap, not a day with no calls.
+
+    Each slot of a missing day takes the median of the same weekday and slot within three weeks either
+    side (observed days only), else the slot's mean over all observed days.
+    """
+    matrix = series.to_numpy(dtype=float).reshape(-1, intervals_per_day)
+    days = series.index[::intervals_per_day].normalize()
+    missing = np.array([day not in observed_days for day in days])
+    if not missing.any():
+        return series, 0
+    filled = matrix.copy()
+    slot_mean = matrix[~missing].mean(axis=0)
+    for index in np.flatnonzero(missing):
+        neighbours = np.arange(index - 21, index + 22, 7)
+        neighbours = neighbours[(neighbours >= 0) & (neighbours < len(days)) & (neighbours != index)]
+        neighbours = neighbours[~missing[neighbours]]
+        filled[index] = np.median(matrix[neighbours], axis=0) if len(neighbours) else slot_mean
+    return pd.Series(filled.reshape(-1), index=series.index), int(missing.sum())
 
 
 def _stl_predict(
@@ -106,10 +146,22 @@ def _stl_predict(
     # Calendar-month/year forecasts may skip dates; advance both trend and phase.
     future_trend = level + slope * steps
     future_seasonal = seasonal[-period:][(steps.astype(np.int64) - 1) % period]
-    prediction = np.maximum(future_trend + future_seasonal, 0)
+    # Robust STL treats the occasional call in a quiet slot as noise, so trend + seasonal alone sits well
+    # below the real average there (1.4 calls a night forecast where the history has 3.4). Add back the
+    # mean residual of each position in the cycle over the last few cycles. Each residual is capped at
+    # four Poisson standard deviations of that interval's fitted level, so a single call in a quiet
+    # slot counts in full but a one-off burst does not carry into every future week. (A cap based on
+    # the spread of all residuals does not work: the robust fit leaves most residuals near zero, so
+    # that spread is tiny and the cap removes the very calls this correction restores.)
+    bias_cycles = min(RESIDUAL_BIAS_CYCLES, len(residual) // period)
+    limit = RESIDUAL_BIAS_SIGMAS * np.sqrt(np.maximum(trend + seasonal, 0) + 1)
+    capped = np.clip(residual, -limit, limit)
+    bias = capped[-bias_cycles * period:].reshape(bias_cycles, period).mean(axis=0)
+    future_bias = bias[(steps.astype(np.int64) - 1) % period]
+    prediction = np.maximum(future_trend + future_seasonal + future_bias, 0)
     if not np.isfinite(prediction).all() or (prediction >= np.iinfo(np.int64).max).any():
         raise ValueError("STL extrapolation exceeds the supported call-count range.")
-    return np.rint(prediction).astype(np.int64), {
+    return prediction, {
         "robust": True,
         "trend_lookback_intervals": int(lookback),
         "trend_start": float(trend[0]),
@@ -118,6 +170,8 @@ def _stl_predict(
         "seasonal_min": float(seasonal.min()),
         "seasonal_max": float(seasonal.max()),
         "residual_std": float(residual.std()),
+        "residual_bias_cycles": int(bias_cycles),
+        "residual_bias_calls_per_cycle": float(bias.sum()),
         "reconstruction_max_error": float(np.max(np.abs(values - trend - seasonal - residual))),
     }
 
@@ -156,6 +210,7 @@ def build_stl_forecast(
     target_seconds: float = 20,
     target_service_level: float = 80,
     shrinkage: float = 30,
+    max_occupancy: float = 85,
     max_agents: int = 1000,
     progress_callback: Optional[Callable[[int, str], None]] = None,
     history_end: Optional[pd.Timestamp] = None,
@@ -243,15 +298,36 @@ def build_stl_forecast(
     history_start = pd.Timestamp(actual_days[0])
     history_end = pd.Timestamp(actual_days[-1]) + pd.Timedelta(days=1)
     history_days = (history_end - history_start).days
+    # The upload size limit doesn't bound this: one stray row from years back made the history (and
+    # every array below) span decades. Refuse before allocating anything per interval.
+    if history_days > MAX_HISTORY_DAYS:
+        raise ValueError(
+            f"The data spans {history_days} days ({history_start.date()} to {(history_end - pd.Timedelta(days=1)).date()}); "
+            f"the limit is {MAX_HISTORY_DAYS}. Check for stray rows with wrong dates."
+        )
+    if history_days * intervals_per_day > MAX_HISTORY_INTERVALS:
+        raise ValueError(
+            f"{history_days} days at {interval_minutes}-minute intervals is too much history "
+            f"(limit {MAX_HISTORY_INTERVALS:,} intervals); use a longer interval or less history."
+        )
+    if forecast_days * intervals_per_day > MAX_FORECAST_ROWS:
+        raise ValueError(
+            f"{forecast_days} days at {interval_minutes}-minute intervals is {forecast_days * intervals_per_day:,} rows; "
+            f"the limit is {MAX_FORECAST_ROWS:,} (what /schedule/monthly accepts). Use fewer days or a longer interval."
+        )
     history_index = pd.date_range(history_start, history_end, freq=f"{interval_minutes}min", inclusive="left")
     call_series = historical.set_index("interval_start")["call_volume"].reindex(history_index, fill_value=0)
+    call_series, missing_days = _fill_missing_days(
+        call_series, {pd.Timestamp(day) for day in actual_days}, intervals_per_day,
+    )
     future_index = pd.date_range(start=start, periods=forecast_days * intervals_per_day, freq=f"{interval_minutes}min")
     use_stl = history_days >= 14 and len(call_series) >= 2 * resolved_period
     use_annual = use_stl and annual_seasonality == "auto" and history_days >= MIN_ANNUAL_HISTORY_DAYS
     decomposition = {
         "historical_intervals": int(len(call_series)),
         "observed_intervals": int(len(historical)),
-        "zero_filled_intervals": int(len(call_series) - len(historical)),
+        "zero_filled_intervals": int(len(call_series) - len(historical) - missing_days * intervals_per_day),
+        "missing_days_filled": missing_days,
         "historical_span_days": int(history_days),
         "prediction_start": start.isoformat(),
         "seasonal_period": resolved_period,
@@ -266,7 +342,7 @@ def build_stl_forecast(
     if use_annual:
         if progress_callback:
             progress_callback(55, "Fitting daily STL with annual seasonality and US holiday effects...")
-        future_values, components = predict_annual(
+        future_values, expected_values, components = predict_annual(
             call_series, future_index, intervals_per_day, trend_lookback_days,
         )
         method = "STL"
@@ -278,9 +354,11 @@ def build_stl_forecast(
     elif use_stl:
         if progress_callback:
             progress_callback(55, "Fitting robust STL trend, seasonal, and residual components...")
-        future_values, components = _stl_predict(
+        predicted, components = _stl_predict(
             call_series, future_index, resolved_period, trend_lookback_days * intervals_per_day,
         )
+        expected_values = predicted
+        future_values = _round_per_day(predicted, intervals_per_day)
         method = "STL"
         logic = "Robust STL decomposition with recent linear trend extrapolation and repeating seasonal cycle."
         decomposition.update(components)
@@ -293,10 +371,12 @@ def build_stl_forecast(
             for day in actual_days
         }
         future_values = []
+        expected_values = []
         for day in pd.date_range(start=start, periods=forecast_days, freq="D"):
             profile = _predict_day_profile(profiles, day)
             profiles[day.normalize()] = profile
-            future_values.extend(profile.tolist())
+            expected_values.extend(profile.tolist())
+            future_values.extend(_round_per_day(profile, intervals_per_day).tolist())
         method = "ROLLING_PROFILE"
         logic = "Rolling-profile fallback for history under 14 days or fewer than two requested seasonal cycles."
         decomposition["fallback_reason"] = (
@@ -307,6 +387,8 @@ def build_stl_forecast(
     future = pd.DataFrame({
         "interval_start": future_index,
         "call_volume": np.asarray(future_values, dtype=np.int64),
+        # Staffing uses the unrounded expectation: 0.2 calls per interval still needs someone answering.
+        "expected_calls": np.round(np.asarray(expected_values, dtype=float), 4),
     })
 
     if progress_callback:
@@ -342,6 +424,7 @@ def build_stl_forecast(
         target_service_level=float(target_service_level),
         shrinkage=float(shrinkage),
         max_agents=int(max_agents),
+        max_occupancy=clean_percent(max_occupancy),
     )
     forecast = pd.concat([future.drop(columns=["slot"]).reset_index(drop=True), metrics], axis=1)
     forecast["date"] = forecast["interval_start"].dt.strftime("%Y-%m-%d")
@@ -381,9 +464,9 @@ def build_stl_forecast(
         )), 2),
         "maximum_raw_agents": int(forecast["raw_agents"].max()),
         "maximum_scheduled_agents": int(forecast["scheduled_agents"].max()),
-        "average_service_level_percent": round(float(forecast["service_level_percent"].mean()), 2),
-        "average_occupancy_percent": round(float(forecast["occupancy_percent"].mean()), 2),
-        "average_asa_seconds": round(float(forecast["asa_seconds"].mean()), 2),
+        # Weighted by calls: an empty interval reports 100% service level and 0s ASA, and a plain mean
+        # of those flatters the headline.
+        **{key: round(value, 2) for key, value in weighted_kpis(forecast).items()},
         "intervals_below_service_target": int((forecast["service_level_percent"] < target_percent).sum()),
         "peak_interval": {
             "interval_start": peak_row["interval_start"].isoformat(),

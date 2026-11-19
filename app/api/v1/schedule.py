@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.schemas.schedule import MonthlyScheduleRequest
 from app.core.scheduling import build_monthly_agent_schedule
+from app.logger import logger
 
 router = APIRouter(prefix="/schedule", tags=["Agent Scheduling"])
 
@@ -35,6 +36,7 @@ def monthly_schedule(request: MonthlyScheduleRequest) -> dict:
             target_seconds=request.target_seconds,
             target_service_level=request.target_service_level,
             shrinkage=request.shrinkage,
+            max_occupancy=request.max_occupancy,
         )
 
         return {
@@ -44,7 +46,8 @@ def monthly_schedule(request: MonthlyScheduleRequest) -> dict:
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception(f"Monthly schedule generation failed: {exc}")
         raise HTTPException(
             status_code=500,
-            detail=f"Monthly schedule generation failed: {exc}",
+            detail="Monthly schedule generation failed unexpectedly. See the forecasting service logs.",
         ) from exc

@@ -20,13 +20,22 @@ def hms_to_seconds(value) -> Optional[int]:
     return hours * 3600 + minutes * 60 + seconds
 
 def talk_time_to_seconds(value) -> Optional[int]:
+    """Seconds from H:MM:SS, MM:SS, a plain number of seconds, or unit text such as "1m 30s"."""
     if pd.isna(value):
         return None
     text = str(value).strip().casefold()
     if not text:
         return None
-    if text.count(":") == 2 and not any(unit in text for unit in ("d", "h", "m", "s")):
-        return hms_to_seconds(text)
+    if not any(unit in text for unit in ("d", "h", "m", "s")):
+        if text.count(":") == 2:
+            return hms_to_seconds(text)
+        if text.count(":") == 1:
+            return hms_to_seconds(f"0:{text}")
+        try:
+            seconds = float(text)
+        except ValueError:
+            return None
+        return int(seconds) if seconds >= 0 else None
     import re
     matches = re.findall(r"(\d+(?:\.\d+)?)\s*(d|h|m|s)", text)
     if not matches:
@@ -35,8 +44,14 @@ def talk_time_to_seconds(value) -> Optional[int]:
     return int(sum(float(amount) * units[unit] for amount, unit in matches))
 
 def clean_percent(value) -> float:
-    number = float(str(value).strip().replace("%", ""))
-    if number > 1:
+    """A percentage as a fraction. "80%", 80 and 0.8 all mean 80%; "1%" and 1 mean 1%.
+
+    Text with a % sign is always a percentage. A bare number of 1 or more is a percentage; below 1 it
+    is already a fraction.
+    """
+    text = str(value).strip()
+    number = float(text.replace("%", ""))
+    if "%" in text or number >= 1:
         number /= 100
     return number
 
@@ -61,19 +76,20 @@ def preprocess_cdr(
     allowed = {value.casefold() for value in (include_dispositions or ["Answered"])}
     frame = raw_frame.copy() if raw_frame is not None else read_cdr_csv(file_path)
 
-    frame["call_datetime"] = pd.to_datetime(frame["call_datetime"], errors="coerce")
+    # format="mixed" parses each value on its own; inferring one format from the first row turned every
+    # row written differently into NaT and silently dropped those calls.
+    frame["call_datetime"] = pd.to_datetime(frame["call_datetime"], errors="coerce", format="mixed")
 
-    parts = frame["duration"].astype(str).str.strip().str.split(":", expand=True)
-    if parts.shape[1] == 3:
-        h = pd.to_numeric(parts[0], errors="coerce")
-        m = pd.to_numeric(parts[1], errors="coerce")
-        s = pd.to_numeric(parts[2], errors="coerce")
-        valid_hms = (h >= 0) & (m >= 0) & (m < 60) & (s >= 0) & (s < 60)
-        dur = pd.Series(float("nan"), index=frame.index, dtype="float64")
-        dur.loc[valid_hms] = (h.loc[valid_hms] * 3600 + m.loc[valid_hms] * 60 + s.loc[valid_hms]).astype(float)
-        frame["duration_seconds"] = dur
-    else:
-        frame["duration_seconds"] = frame["duration"].map(talk_time_to_seconds)
+    # H:MM:SS (the usual export) is parsed in bulk; anything else -- MM:SS, plain seconds, "1m 30s" --
+    # value by value, so a file mixing formats keeps every row.
+    text = frame["duration"].astype(str).str.strip()
+    hms = text.str.extract(r"^(\d+):(\d{1,2}):(\d{1,2})$").apply(pd.to_numeric, errors="coerce")
+    valid_hms = hms[0].notna() & (hms[1] < 60) & (hms[2] < 60)
+    dur = pd.Series(float("nan"), index=frame.index, dtype="float64")
+    dur.loc[valid_hms] = (hms.loc[valid_hms, 0] * 3600 + hms.loc[valid_hms, 1] * 60 + hms.loc[valid_hms, 2]).astype(float)
+    others = ~valid_hms & frame["duration"].notna()
+    dur.loc[others] = frame.loc[others, "duration"].map(talk_time_to_seconds).astype("float64")
+    frame["duration_seconds"] = dur
 
     source_ok = frame["source"].notna() & frame["source"].astype(str).str.strip().ne("")
     destination_text = frame["destination"].fillna("").astype(str).str.strip()

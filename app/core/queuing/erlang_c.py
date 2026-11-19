@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import ceil, floor
 from pyworkforce.queuing import ErlangC
 from app.core.ingestion.cleaner import clean_percent
 
@@ -28,6 +29,7 @@ def required_agents(
     target_service_level: float,
     shrinkage: float = 0.0,
     max_agents: int = 1000,
+    max_occupancy: float = 1.0,
 ) -> dict:
     target_service_level = clean_percent(target_service_level)
     shrinkage = clean_percent(shrinkage)
@@ -38,14 +40,16 @@ def required_agents(
         raise ValueError("AHT seconds must be greater than 0.")
     if interval_seconds <= 0:
         raise ValueError("Interval seconds must be greater than 0.")
-    if target_seconds < 0:
-        raise ValueError("Target seconds cannot be negative.")
+    if target_seconds <= 0:
+        raise ValueError("Target seconds must be greater than 0.")
     if not 0 < target_service_level < 1:
         raise ValueError("Target service level must be between 0% and 100%.")
     if not 0 <= shrinkage < 1:
         raise ValueError("Shrinkage must be between 0% and less than 100%.")
     if max_agents <= 0:
         raise ValueError("max_agents must be greater than 0.")
+    if not 0 < max_occupancy <= 1:
+        raise ValueError("Maximum occupancy must be above 0% and at most 100%.")
 
     if call_volume == 0:
         return {
@@ -65,14 +69,30 @@ def required_agents(
         interval=interval_seconds / 60,
         shrinkage=shrinkage,
     )
-    result = model.required_positions(service_level=target_service_level)
+    result = model.required_positions(service_level=target_service_level, max_occupancy=max_occupancy)
+    traffic = calculate_traffic(call_volume, aht_seconds, interval_seconds)
 
+    # pyworkforce starts its search at round(traffic + 1), so when traffic's fraction is .5 or more it
+    # never tries floor(traffic) + 1 and can ask for one agent too many. Try that one too.
     raw_agents = int(result["raw_positions"])
+    fewer = floor(traffic) + 1
+    if (
+        fewer == raw_agents - 1
+        and model.service_level(fewer) >= target_service_level
+        and model.achieved_occupancy(fewer) <= max_occupancy
+    ):
+        raw_agents = fewer
+        result = {
+            "raw_positions": fewer,
+            "positions": ceil(fewer / (1 - shrinkage)),
+            "service_level": model.service_level(fewer),
+            "occupancy": model.achieved_occupancy(fewer),
+            "waiting_probability": model.waiting_probability(fewer),
+        }
     scheduled_agents = int(result["positions"])
     if raw_agents > max_agents or scheduled_agents > max_agents:
         raise RuntimeError("Required agents exceed max_agents limit.")
 
-    traffic = calculate_traffic(call_volume, aht_seconds, interval_seconds)
     asa = average_speed_of_answer(
         float(result["waiting_probability"]),
         aht_seconds,

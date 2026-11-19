@@ -1,6 +1,6 @@
 # CDR STL Forecast & Agent Scheduling
 
-A REST API that reads historical call-detail records (CDRs) from a contact centre, forecasts call volume, works out how many agents are needed, and builds a monthly roster of three 8-hour shifts. It ships as a Docker container that exposes the API on port 8000.
+A REST API that reads historical call-detail records (CDRs) from a contact centre, forecasts call volume, works out how many agents are needed, and builds a monthly roster of three 8-hour shifts. It ships as a Docker container that exposes the API on port 8010.
 
 **Version:** `4.4.0`
 
@@ -33,13 +33,13 @@ docker compose up --build -d
 Check that it is running (Docker marks the container healthy within about 30 seconds):
 
 ```powershell
-curl.exe http://127.0.0.1:8000/health
+curl.exe http://127.0.0.1:8010/health
 # {"status":"healthy","version":"4.4.0"}
 python tools/smoke_test.py
 # 8 of 8 checks passed
 ```
 
-Then open **http://127.0.0.1:8000/docs** for the interactive API. Opening `/` returns a short JSON message, because the container has no browser dashboard.
+Then open **http://127.0.0.1:8010/docs** for the interactive API. Opening `/` returns a short JSON message, because the container has no browser dashboard.
 
 | Task | Command |
 |---|---|
@@ -57,7 +57,7 @@ Send your own CDR files (see [accepted formats](ARCHITECTURE.md#61-cdr-input)). 
 
 ```bash
 # 1. Forecast
-curl -X POST http://127.0.0.1:8000/api/v1/cdr/stl-forecast \
+curl -X POST http://127.0.0.1:8010/api/v1/cdr/stl-forecast \
   -F "files=@calls.csv" -F "interval_minutes=30" \
   -F "target_seconds=20" -F "target_service_level=80" -F "shrinkage=30" > forecast.json
 
@@ -67,7 +67,7 @@ import json
 rows = json.load(open("forecast.json"))["forecast"]
 print(json.dumps({"forecast": rows, "year": int(rows[0]["interval_start"][:4]), "month": int(rows[0]["interval_start"][5:7])}))
 EOF
-curl -X POST http://127.0.0.1:8000/api/v1/schedule/monthly \
+curl -X POST http://127.0.0.1:8010/api/v1/schedule/monthly \
   -H "Content-Type: application/json" --data-binary "@schedule-request.json"
 ```
 
@@ -77,23 +77,31 @@ In PowerShell use `curl.exe`. For large histories use the background route (`/ap
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `APP_PORT` | `8000` | Port published on `127.0.0.1` |
-| `CORS_ALLOW_ORIGINS` | `http://localhost:5500,http://127.0.0.1:5500` | Browser origins allowed to call the API. Set it to your front end's address, or leave it empty to block browsers on other origins |
+| `APP_PORT` | `8010` | Port published on `127.0.0.1` |
+| `CORS_ALLOW_ORIGINS` | empty (off) | Browser origins allowed to call the API. Set it to your front end's address, or leave it empty to block browsers on other origins |
 | `APP_MEM_LIMIT` | `2g` | Container memory limit |
+| `INTERNAL_API_KEY` | empty (off) | When set, every `/api` request must send it in the `X-Internal-Key` header. Set it in production and give the same value to ciap-api |
+| `FORECAST_PROCESSES` | `2` | Worker processes that run forecasts (the API process stays free for `/health`) |
+| `MAX_QUEUED_COMPUTATIONS` | `4` | Forecasts that may wait for a worker; past this the API answers 503 |
+| `JOB_TTL_SECONDS` | `3600` | How long a finished background job and its result are kept |
+| `MAX_HISTORY_DAYS` | `1098` | Longest date span accepted in uploaded history |
+| `LOG_TO_FILE` | `true` | `false` logs to stdout only |
 
-Put them in a `.env` file next to `compose.yaml` (start from `.env.example`). Staffing settings (service target, shrinkage, coverage, minimums) are request fields, not environment variables. Upload limits are in `app/config.py`: 10 files of 25 MiB, 3,650 forecast days, 40,000 forecast rows per schedule request.
+Put them in a `.env` file next to `compose.yaml` (start from `.env.example`). Staffing settings (service target, shrinkage, coverage, minimums) are request fields, not environment variables. Upload limits are in `app/config.py`: 10 files of 25 MiB (the whole request body is capped while it streams in), 3,650 forecast days, and 40,000 forecast rows (days × intervals per day) per forecast or schedule request.
+
+Background jobs live in the one API process: they are lost on restart and are not shared between replicas, so run a single instance or have the caller use the synchronous endpoint.
 
 ### What is in the container
 
 | Item | Detail |
 |---|---|
 | Image | `python:3.12-slim`, containing only `app/` and the pinned `requirements.txt` |
-| Process | `uvicorn app.main:app`, one worker, port 8000 |
+| Process | `uvicorn app.main:app`, one worker, port 8010 |
 | User and filesystem | Non-root (UID 10001), read-only root filesystem, all Linux capabilities dropped, `no-new-privileges` |
 | Limits | 2 GB memory, 256 processes, 512 MiB temporary upload space (deleted after each request) |
 | Logs | Console (rotated by Docker: 5 files of 10 MB) and `/app/logs` in the `app-logs` volume (daily files, 30 kept) |
 | Health check | `GET /health` every 30 seconds |
-| Not included | The browser pages (`static/`, `backtest-ui/`), `tools/`, test data and documentation |
+| Not included | `tools/`, test data and documentation |
 
 ## Using it in production
 
@@ -108,7 +116,7 @@ The service is set up to run unattended, but it is deliberately simple. Before e
 
 ## Run without Docker
 
-Python 3.10 or later. This also serves the browser dashboard.
+Python 3.10 or later.
 
 ```powershell
 python -m venv .venv
@@ -117,14 +125,13 @@ python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --reload
 ```
 
-On Linux or macOS use `source .venv/bin/activate`. Then open http://127.0.0.1:8000/ for the dashboard and `/docs` for the API.
+On Linux or macOS use `source .venv/bin/activate`. Then open http://127.0.0.1:8010/docs for the API.
 
 ## Checking quality
 
 | Tool | What it tells you |
 |---|---|
 | `python tools/smoke_test.py` | A running API works end to end |
-| Backtest page: `python -m http.server 5500 --directory backtest-ui`, then http://localhost:5500 | How close the forecast is to held-out days of your data. `drilldown.html` zooms from month to half-hour |
 | `python tools/shift_coverage_check.py --data <file>` | Share of shifts covered, short and extra, old rule vs current policy (needs a CDR file with earlier history plus a test period) |
 | `python tools/build_comparison_page.py` | One HTML page comparing the forecast with the real calls, and planned with needed agents per shift, drillable month to half-hour |
 

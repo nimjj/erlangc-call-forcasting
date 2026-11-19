@@ -56,6 +56,7 @@ def run_backtest(
     target_seconds: float = 20,
     target_service_level: float = 80,
     shrinkage: float = 30,
+    max_occupancy: float = 85,
     max_agents: int = 1000,
     annual_seasonality: str = "auto",
 ) -> dict:
@@ -111,6 +112,7 @@ def run_backtest(
         target_seconds=target_seconds,
         target_service_level=target_service_level,
         shrinkage=shrinkage,
+        max_occupancy=max_occupancy,
         max_agents=max_agents,
         history_end=cutoff,
         annual_seasonality=annual_seasonality,

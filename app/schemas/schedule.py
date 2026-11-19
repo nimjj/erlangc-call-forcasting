@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from app.config import MAX_FORECAST_ROWS, MAX_AGENT_COUNT
 
 class MonthlyScheduleRequest(BaseModel):
@@ -25,5 +25,17 @@ class MonthlyScheduleRequest(BaseModel):
         description="Minimum agents on Saturday and Sunday day shifts. 0 turns it off.",
     )
     target_seconds: float = Field(default=20, gt=0, description="Answer-time target for the simulated shifts; use the value the forecast was made with.")
-    target_service_level: float = Field(default=80, gt=0, le=100, description="Service-level target (percent) for the simulated shifts.")
+    target_service_level: float = Field(default=80, ge=1, lt=100, description="Service-level target (percent) for the simulated shifts.")
     shrinkage: float = Field(default=30, ge=0, lt=100, description="Shrinkage (percent) for the simulated shifts.")
+    max_occupancy: float = Field(
+        default=85, ge=1, le=100,
+        description="Most of an agent's time that may go to calls (percent), for the simulated shifts; use the value the forecast was made with. 100 = no cap.",
+    )
+
+    @field_validator("shrinkage")
+    @classmethod
+    def shrinkage_is_a_whole_percentage(cls, value: float) -> float:
+        # Between 0 and 1 the core would read it as a fraction (0.5 -> 50%).
+        if 0 < value < 1:
+            raise ValueError("shrinkage is a percentage: use 0, or a value from 1 to 99 (e.g. 30 for 30%).")
+        return value

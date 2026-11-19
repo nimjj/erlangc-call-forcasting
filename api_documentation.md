@@ -14,7 +14,7 @@ Interactive documentation:
 
 | Method | Path | Content type | Description |
 |---|---|---|---|
-| `GET` | `/` | — | Serve dashboard or return service information |
+| `GET` | `/` | — | Return service information |
 | `GET` | `/health` | — | Return health and version |
 | `POST` | `/api/v1/cdr/stl-forecast` | `multipart/form-data` | Forecast calls using STL (rolling fallback for short history) and calculate Erlang C staffing |
 | `POST` | `/api/v1/cdr/stl-forecast/async` | `multipart/form-data` | Submit background forecast job |
@@ -27,11 +27,7 @@ Interactive documentation:
 
 ## GET `/`
 
-If `static/index.html` exists, the API returns that dashboard file. This is the case when you run the app locally with Uvicorn.
-
-The Docker image is backend-only and does not contain `static/`, so in the container `/` always returns the fallback below and `/static/...` returns 404.
-
-Otherwise the fallback response is service information similar to:
+Returns service information and documentation link:
 
 ```json
 {
@@ -78,6 +74,7 @@ multipart/form-data
 | `target_seconds` | number | `20` | no | >= 0 |
 | `target_service_level` | number | `80` | no | after percent conversion, strictly between 0 and 1 |
 | `shrinkage` | number | `30` | no | after percent conversion, >= 0 and < 1 |
+| `max_occupancy` | number | `85` | no | 1-100; the most of an agent's time that may go to calls, in percent. 85-90 is typical; `100` means no cap |
 | `max_agents` | integer | `1000` | no | 1-10,000; neither raw nor scheduled staffing may exceed it |
 | `include_forecast_rows` | boolean | `true` | no | controls whether full forecast rows are returned |
 
@@ -196,7 +193,7 @@ With `annual_seasonality=auto` (default) and a historical span of at least 365 d
 1. Robust weekly STL (period 7) on daily totals, refitted after replacing US holidays and outlier days with fitted values.
 2. An annual Fourier curve over day of year (2 harmonics for 1-2 years of history, 3 for 2+ years), fitted jointly with a linear spline trend with one knot per year.
 3. A linear trend over the last `trend_lookback_days` of the deseasonalised series, damped by 0.6 per week; the level is calibrated to reproduce the last 28 training days' call total.
-4. Holiday multipliers learned from past occurrences of each observed US federal holiday, Thanksgiving eve, the day after Thanksgiving, Christmas Eve and New Year's Eve, blended with class defaults.
+4. Holiday multipliers learned from past occurrences of each observed US federal holiday, Thanksgiving eve, the day after Thanksgiving, Christmas Eve and New Year's Eve (the median ratio to a normal day, from the history alone). A holiday the history never shows is not adjusted.
 5. Each day split into intervals with the weekday's intraday profile from the last 26 weeks; largest-remainder rounding keeps interval counts summing to the daily total.
 
 `decomposition_summary` adds `model_variant: "daily_stl_annual"`, `annual_seasonality: true`, `annual_harmonics`, `annual_peak_to_trough_ratio`, `trend_knots_days`, `trend_lookback_days_used`, `trend_slope_per_day_log`, `trend_damping_per_week`, `terminal_level_calls_per_day`, `level_calibration_factor`, `level_calibration_days`, `weekly_factors`, `holiday_days_adjusted`, `holiday_multipliers`, `outliers_masked`, `outlier_dates`, `residual_std_log`, and `predicted_daily_mean`. When the annual model does not run, `annual_seasonality` is `false` and `annual_seasonality_reason` explains why.
@@ -417,7 +414,7 @@ Streams server-sent events as `text/event-stream` when progress or status change
 
 # POST `/api/v1/cdr/backtest`
 
-Measures forecast accuracy on held-out data. Records before `train_end` are used for training, and the forecast for the remaining days is compared with the calls that actually arrived and with simple baselines. The standalone page in `backtest-ui/` calls this endpoint; see the README section "Checking quality".
+Measures forecast accuracy on held-out data. Records before `train_end` are used for training, and the forecast for the remaining days is compared with the calls that actually arrived and with simple baselines.
 
 The request is synchronous. It returns the full result in one response and runs on a worker thread, so other requests stay responsive while it computes.
 
@@ -440,6 +437,7 @@ multipart/form-data
 | `target_seconds` | number | `20` | no | Passed to the staffing calculation |
 | `target_service_level` | number | `80` | no | Passed to the staffing calculation |
 | `shrinkage` | number | `30` | no | Passed to the staffing calculation |
+| `max_occupancy` | number | `85` | no | 1-100; passed to the staffing calculation. `100` means no cap |
 | `max_agents` | integer | `1000` | no | 1-10,000 |
 
 ## Split rules
@@ -598,6 +596,7 @@ This small example demonstrates the request format. Supply the complete forecast
 | night_minimum_agents | integer | Default 3; 0-10,000. Minimum agents on the night shift |
 | weekend_minimum_agents | integer | Default 3; 0-10,000. Minimum agents on Saturday and Sunday day shifts |
 | target_seconds, target_service_level, shrinkage | numbers | Defaults 20, 80, 30. Use the values the forecast was made with |
+| max_occupancy | number | Default 85; 1-100. Use the value the forecast was made with. Applies to the simulated shifts when coverage_percent is set; 100 means no cap |
 
 Save the JSON above as schedule-request.json, then run:
 

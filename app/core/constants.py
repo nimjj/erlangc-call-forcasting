@@ -21,6 +21,7 @@ FORECAST_COLUMNS = [
     "hour",
     "minute",
     "call_volume",
+    "expected_calls",
     "aht_seconds",
     "traffic_erlangs",
     "raw_agents",

@@ -27,3 +27,12 @@ docs/
 postman/
 
 testdata/
+
+# Build artifacts & packages
+node_modules/
+dist/
+target/
+*.class
+*.jar
+*.exe
+*.app

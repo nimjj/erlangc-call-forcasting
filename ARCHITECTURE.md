@@ -2,7 +2,7 @@
 
 How the service is built, where each piece of the code lives, how a request moves through it, and what every REST endpoint does. For setup and running, see [README.md](README.md). For the forecasting and staffing maths, accuracy and limitations, see [LOGIC_AND_LIMITATIONS.md](LOGIC_AND_LIMITATIONS.md). Field-by-field request and response examples are in [api_documentation.md](api_documentation.md).
 
-Contents: [1. Overview](#1-overview) · [2. Deployment](#2-deployment) · [3. Repository map](#3-repository-map) · [4. Codebase tour](#4-codebase-tour) · [5. Request flows](#5-request-flows) · [6. Data formats](#6-data-formats) · [7. Endpoint reference](#7-endpoint-reference) · [8. Configuration, state and logging](#8-configuration-state-and-logging) · [9. Errors](#9-errors) · [10. Local dashboard](#10-local-dashboard) · [11. Where to change things](#11-where-to-change-things)
+Contents: [1. Overview](#1-overview) · [2. Deployment](#2-deployment) · [3. Repository map](#3-repository-map) · [4. Codebase tour](#4-codebase-tour) · [5. Request flows](#5-request-flows) · [6. Data formats](#6-data-formats) · [7. Endpoint reference](#7-endpoint-reference) · [8. Configuration, state and logging](#8-configuration-state-and-logging) · [9. Errors](#9-errors) · [10. API-Only Operation](#10-api-only-operation) · [11. Where to change things](#11-where-to-change-things)
 
 ## 1. Overview
 
@@ -42,12 +42,12 @@ flowchart TD
 | Item | Detail |
 |---|---|
 | Packaging | One Docker image (`python:3.12-slim`) that contains only `app/` and the pinned `requirements.txt` |
-| Process | `uvicorn app.main:app` with **one** worker on port 8000 |
-| Exposure | Published on `127.0.0.1:${APP_PORT:-8000}` only |
+| Process | `uvicorn app.main:app` with **one** worker on port 8010 |
+| Exposure | Published on `127.0.0.1:${APP_PORT:-8010}` only |
 | Hardening | Non-root user (UID 10001), read-only root filesystem, all capabilities dropped, `no-new-privileges`, 2 GB memory limit, 256-process limit |
 | Storage | `/tmp` is a 512 MiB tmpfs for uploads (deleted after each request); `/app/logs` is a named volume |
 | Health | `GET /health`, polled by Docker every 30 seconds |
-| Browser pages | `static/` and `backtest-ui/` are **not** in the image. Run locally with Uvicorn for the dashboard, or serve `backtest-ui/` separately |
+| Architecture | Backend-only REST API; frontend applications integrate via HTTP REST / CORS |
 
 Why one worker: background jobs and their results live in the memory of the process that started them (see [section 8](#8-configuration-state-and-logging)). More workers or containers would not share them.
 
@@ -57,7 +57,7 @@ Why one worker: background jobs and their results live in the memory of the proc
 .
 |-- api.py                          # Compatibility entry point (python -m uvicorn api:app)
 |-- app/                            # Everything the Docker image contains
-|   |-- main.py                     # App factory: routers, request-ID logging, CORS, optional static files
+|   |-- main.py                     # App factory: routers, request-ID logging, CORS
 |   |-- config.py                   # Limits, paths, CORS_ALLOW_ORIGINS
 |   |-- logger.py                   # Console + daily rotating file logs
 |   |-- api/
@@ -75,8 +75,6 @@ Why one worker: background jobs and their results live in the memory of the proc
 |   |   |-- queuing/                # erlang_c.py, staffing.py, peak_staffing.py
 |   |   `-- scheduling/             # shifts.py, roster.py
 |   `-- workers/                    # task_manager.py (in-memory jobs), jobs.py (forecast worker)
-|-- static/index.html               # Local dashboard (not in the image)
-|-- backtest-ui/                    # Backtest and drill-down pages (not in the image)
 |-- tools/                          # Command-line helpers (not in the image), see section 4.7
 |-- Dockerfile, compose.yaml, .dockerignore, .env.example
 |-- requirements.txt                # Pinned dependencies
@@ -88,7 +86,7 @@ Why one worker: background jobs and their results live in the memory of the proc
 
 ### 4.1 Application shell
 
-- `app/main.py` builds the FastAPI app, adds a middleware that logs every request with a short ID (returned as `X-Request-ID`), enables CORS only for the origins in `CORS_ALLOW_ORIGINS`, mounts `/static` if the folder exists, and includes the routers.
+- `app/main.py` builds the FastAPI app, adds a middleware that logs every request with a short ID (returned as `X-Request-ID`), enables CORS only for the origins in `CORS_ALLOW_ORIGINS`, and includes the routers.
 - `app/config.py` holds the numeric limits and the CORS setting. `app/logger.py` writes to the console and to `logs/app_<date>.log` (daily rotation, 30 files kept).
 
 ### 4.2 Ingestion (`app/core/ingestion/`)
@@ -232,7 +230,7 @@ Interactive documentation is served at `/docs` (Swagger) and `/redoc`; the schem
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/` | Dashboard if `static/` exists, otherwise a small JSON service message (the container) |
+| `GET` | `/` | Small JSON service message and link to `/docs` |
 | `GET` | `/health` | `{"status":"healthy","version":"4.4.0"}` |
 | `POST` | `/api/v1/cdr/stl-forecast` | Forecast and staffing, returned directly |
 | `POST` | `/api/v1/cdr/stl-forecast/async` | Same, as a background job |
@@ -256,6 +254,7 @@ Interactive documentation is served at `/docs` (Swagger) and `/redoc`; the schem
 | `target_seconds` | number | `20` | Answer-time target |
 | `target_service_level` | number | `80` | Percent answered within the target |
 | `shrinkage` | number | `30` | Percent of rostered time not available |
+| `max_occupancy` | number | `85` | 1-100; most of an agent's time that may go to calls. `100` = no cap |
 | `max_agents` | integer | `1000` | 1-10,000 cap per interval |
 | `include_forecast_rows` | boolean | `true` | `false` returns summaries and charts only |
 
@@ -264,7 +263,7 @@ Percent fields accept `80` or `0.8` (values above 1 are divided by 100); exactly
 Response: `method` (`STL` or `ROLLING_PROFILE`), `forecast` (rows), `charts`, `parameters`, `decomposition_summary` (which model ran and its diagnostics), totals (`total_predicted_calls`, peak interval, maximum agents) and `source_data` (per-file cleaning counts).
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/cdr/stl-forecast \
+curl -X POST http://127.0.0.1:8010/api/v1/cdr/stl-forecast \
   -F "files=@calls.csv" -F "interval_minutes=30" -F "target_seconds=20" \
   -F "target_service_level=80" -F "shrinkage=30" > forecast.json
 ```
@@ -289,6 +288,7 @@ JSON body:
 | `night_minimum_agents` | integer | `3` | Minimum for the night shift; `0` turns it off |
 | `weekend_minimum_agents` | integer | `3` | Minimum for Saturday and Sunday day shifts; `0` turns it off |
 | `target_seconds`, `target_service_level`, `shrinkage` | numbers | `20`, `80`, `30` | Use the values the forecast was made with |
+| `max_occupancy` | number | `85` | 1-100; use the value the forecast was made with. Applies to the simulated shifts; `100` = no cap |
 
 Response: `schedule` (one row per agent per day: `WORK` with a shift, or `OFF`) and `summary` (`minimum_agents`, `agent_count`, `shifts`, `staffing_policy`, `total_required_shift_assignments`, `coverage_shortage`, `coverage_ok`, and `coverage` per day and shift with `required_agents`, `assigned_agents`, `shortage`). Check `coverage_ok` even on HTTP 200.
 
@@ -298,7 +298,7 @@ import json
 rows = json.load(open("forecast.json"))["forecast"]
 print(json.dumps({"forecast": rows, "year": int(rows[0]["interval_start"][:4]), "month": int(rows[0]["interval_start"][5:7])}))
 EOF
-curl -X POST http://127.0.0.1:8000/api/v1/schedule/monthly \
+curl -X POST http://127.0.0.1:8010/api/v1/schedule/monthly \
   -H "Content-Type: application/json" --data-binary "@schedule-request.json"
 ```
 
@@ -312,8 +312,8 @@ An overnight shift belongs to its start date, and its requirement uses the follo
 
 | Variable | Default | Effect |
 |---|---|---|
-| `APP_PORT` | `8000` | Host port for the published API |
-| `CORS_ALLOW_ORIGINS` | `http://localhost:5500,http://127.0.0.1:5500` | Browser origins allowed to call the API; empty disables cross-origin access |
+| `APP_PORT` | `8010` | Host port for the published API |
+| `CORS_ALLOW_ORIGINS` | empty (off) | Browser origins allowed to call the API; empty disables cross-origin access |
 | `APP_MEM_LIMIT` | `2g` | Container memory limit |
 
 **Limits** are constants in `app/config.py`: 25 MiB per upload, 10 files, 3,650 forecast days, 10,000 agents, 40,000 forecast rows per schedule request, 8 worker threads.
@@ -334,17 +334,9 @@ An overnight shift belongs to its start date, and its requirement uses the follo
 
 Errors carry a `detail` message. A background job can end with `status: failed` and an `error` after an HTTP 200 submission. A schedule can return HTTP 200 with `coverage_ok: false`.
 
-## 10. Local dashboard
+## 10. API-Only Operation
 
-`static/index.html` is a single-page tool served at `/` when the app runs locally with Uvicorn (the container has no dashboard). It uses Chart.js from a CDN.
-
-1. Upload one or more CDR files, set the answer-time and service-level targets, and create the forecast (it uses the background endpoint and polls every 500 ms).
-2. Review the monthly, weekday and time-of-day charts, and inspect a date's staffing in a table that can be grouped by 0.5 to 8 hours.
-3. Download the hourly forecast for the whole output year as CSV.
-4. Pick a month, optionally enter an available agent count, and generate the monthly schedule. The dashboard sends its current answer-time and service-level inputs with the request and uses the default staffing policy.
-5. Review the daily scheduled agents per shift and download them as CSV. Shift start times can be changed; the three shifts must be eight hours apart.
-
-Charts assume a single forecast year. The CSV exports are built in the browser (UTF-8 with BOM) and contain the displayed data.
+The service operates purely as a backend REST API microservice. Frontend web applications or dashboards connect externally via HTTP REST endpoints (CORS configured via `CORS_ALLOW_ORIGINS`). Interactive API documentation is available directly at `/docs` and `/redoc`.
 
 ## 11. Where to change things
 

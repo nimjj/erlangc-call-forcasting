@@ -1,0 +1,417 @@
+{
+	"info": {
+		"_postman_id": "a918e32c-5f72-4b36-b18c-3bc635d96201",
+		"name": "CDR STL Forecast & Agent Scheduling API",
+		"description": "Postman collection for CDR STL Forecast & Agent Scheduling API (v4.4.0).\n\nIncludes endpoints for:\n- Health checks\n- Synchronous and Asynchronous STL Forecasting (multipart/form-data)\n- Job polling and Server-Sent Events (SSE)\n- Monthly Shift Scheduling & Roster Generation (application/json)\n- Model Backtesting (multipart/form-data)",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://127.0.0.1:8010",
+			"type": "string"
+		},
+		{
+			"key": "job_id",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "1. Health & Service Info",
+			"item": [
+				{
+					"name": "GET Service Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								""
+							]
+						},
+						"description": "Returns dashboard if running with static assets, or basic service information JSON if running in container."
+					},
+					"response": []
+				},
+				{
+					"name": "GET Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/health",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"health"
+							]
+						},
+						"description": "Returns system health and current version: {\"status\":\"healthy\",\"version\":\"4.4.0\"}"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "2. Forecasting (Sync & Async)",
+			"item": [
+				{
+					"name": "POST Sync Forecast (/api/v1/cdr/stl-forecast)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "files",
+									"description": "One or more CDR CSV/TXT files (e.g. sample_calls.csv). Max 10 files, 25MB each.",
+									"type": "file",
+									"src": []
+								},
+								{
+									"key": "interval_minutes",
+									"value": "30",
+									"description": "Aggregation bucket in minutes (e.g. 15, 30, 60). Default 30.",
+									"type": "text"
+								},
+								{
+									"key": "forecast_days",
+									"value": "365",
+									"description": "Number of days to forecast (1-3650). Default 365 selects automatic duration.",
+									"type": "text"
+								},
+								{
+									"key": "target_seconds",
+									"value": "20",
+									"description": "Answer time target in seconds (e.g. 20).",
+									"type": "text"
+								},
+								{
+									"key": "target_service_level",
+									"value": "80",
+									"description": "Target service level percentage (e.g. 80 for 80%).",
+									"type": "text"
+								},
+								{
+									"key": "shrinkage",
+									"value": "30",
+									"description": "Shrinkage buffer percentage for breaks/absenteeism (e.g. 30 for 30%).",
+									"type": "text"
+								},
+								{
+									"key": "max_occupancy",
+									"value": "85",
+									"description": "Most of an agent's time that may go to calls, in percent (1-100). Default 85; 100 = no cap.",
+									"type": "text"
+								},
+								{
+									"key": "annual_seasonality",
+									"value": "auto",
+									"description": "'auto' or 'off'. 'auto' uses yearly Fourier & US holidays for 365+ days history.",
+									"type": "text"
+								},
+								{
+									"key": "trend_lookback_days",
+									"value": "90",
+									"description": "Recent days of trend used for linear extrapolation (>= 7). Default 90.",
+									"type": "text"
+								},
+								{
+									"key": "seasonal_period",
+									"value": "336",
+									"description": "STL cycle length in intervals (336 = 1 week of 30-min intervals).",
+									"type": "text"
+								},
+								{
+									"key": "include_forecast_rows",
+									"value": "true",
+									"description": "Whether to return the full array of predicted intervals. Default true.",
+									"type": "text"
+								},
+								{
+									"key": "max_agents",
+									"value": "1000",
+									"description": "Max agent ceiling (1-10000). Default 1000.",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/cdr/stl-forecast",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"cdr",
+								"stl-forecast"
+							]
+						},
+						"description": "Synchronous forecast endpoint. Directly processes the files and returns the forecast, charts, metrics, and Erlang C staffing."
+					},
+					"response": []
+				},
+				{
+					"name": "POST Async Forecast (/api/v1/cdr/stl-forecast/async)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var data = pm.response.json();",
+									"    if (data.job_id) {",
+									"        pm.collectionVariables.set(\"job_id\", data.job_id);",
+									"        console.log(\"Saved job_id to collection variable:\", data.job_id);",
+									"    }",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "files",
+									"description": "One or more CDR CSV/TXT files (e.g. sample_calls.csv).",
+									"type": "file",
+									"src": []
+								},
+								{
+									"key": "interval_minutes",
+									"value": "30",
+									"type": "text"
+								},
+								{
+									"key": "forecast_days",
+									"value": "365",
+									"type": "text"
+								},
+								{
+									"key": "target_seconds",
+									"value": "20",
+									"type": "text"
+								},
+								{
+									"key": "target_service_level",
+									"value": "80",
+									"type": "text"
+								},
+								{
+									"key": "shrinkage",
+									"value": "30",
+									"type": "text"
+								},
+								{
+									"key": "max_occupancy",
+									"value": "85",
+									"type": "text"
+								},
+								{
+									"key": "annual_seasonality",
+									"value": "auto",
+									"type": "text"
+								},
+								{
+									"key": "include_forecast_rows",
+									"value": "true",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/cdr/stl-forecast/async",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"cdr",
+								"stl-forecast",
+								"async"
+							]
+						},
+						"description": "Recommended for production/large datasets. Enqueues a background job and immediately returns job_id and poll_url. Saves job_id automatically to collection variable."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "3. Background Jobs",
+			"item": [
+				{
+					"name": "GET Job Status & Result (/api/v1/jobs/{job_id})",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/jobs/{{job_id}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"jobs",
+								"{{job_id}}"
+							]
+						},
+						"description": "Poll status of a forecast job. When status is 'completed', the 'result' object contains the full forecast and staffing data."
+					},
+					"response": []
+				},
+				{
+					"name": "GET Stream Job Progress SSE (/api/v1/jobs/{job_id}/stream)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Accept",
+								"value": "text/event-stream"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/jobs/{{job_id}}/stream",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"jobs",
+								"{{job_id}}",
+								"stream"
+							]
+						},
+						"description": "Server-Sent Events (SSE) connection that streams progress percentage (0-100%) and status messages until completion."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "4. Monthly Schedule & Rostering",
+			"item": [
+				{
+					"name": "POST Monthly Schedule (/api/v1/schedule/monthly)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"year\": 2025,\n  \"month\": 4,\n  \"agent_count\": null,\n  \"shift_start_times\": [\"00:00\", \"08:00\", \"16:00\"],\n  \"coverage_percent\": 80,\n  \"night_minimum_agents\": 3,\n  \"weekend_minimum_agents\": 3,\n  \"target_seconds\": 20,\n  \"target_service_level\": 80,\n  \"shrinkage\": 30,\n  \"max_occupancy\": 85,\n  \"forecast\": [\n    {\n      \"interval_start\": \"2025-04-01T00:00:00\",\n      \"call_volume\": 1,\n      \"aht_seconds\": 300.0,\n      \"scheduled_agents\": 2\n    },\n    {\n      \"interval_start\": \"2025-04-01T00:30:00\",\n      \"call_volume\": 0,\n      \"aht_seconds\": 300.0,\n      \"scheduled_agents\": 1\n    },\n    {\n      \"interval_start\": \"2025-04-01T08:00:00\",\n      \"call_volume\": 5,\n      \"aht_seconds\": 320.0,\n      \"scheduled_agents\": 4\n    },\n    {\n      \"interval_start\": \"2025-04-01T08:30:00\",\n      \"call_volume\": 7,\n      \"aht_seconds\": 350.0,\n      \"scheduled_agents\": 6\n    },\n    {\n      \"interval_start\": \"2025-04-01T16:00:00\",\n      \"call_volume\": 4,\n      \"aht_seconds\": 310.0,\n      \"scheduled_agents\": 4\n    },\n    {\n      \"interval_start\": \"2025-04-01T16:30:00\",\n      \"call_volume\": 3,\n      \"aht_seconds\": 310.0,\n      \"scheduled_agents\": 3\n    }\n  ]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/schedule/monthly",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"schedule",
+								"monthly"
+							]
+						},
+						"description": "Takes the forecast interval rows and builds a complete monthly 3-shift roster (Night, Morning, Evening) covering every day of the month with Erlang C peak simulation and minimum staffing."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "5. Quality & Backtesting",
+			"item": [
+				{
+					"name": "POST Backtest (/api/v1/cdr/backtest)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "files",
+									"description": "CDR CSV file spanning training and test days.",
+									"type": "file",
+									"src": []
+								},
+								{
+									"key": "train_end",
+									"value": "2025-02-15",
+									"description": "Cutoff date (YYYY-MM-DD). Data before this trains the model, data after tests accuracy.",
+									"type": "text"
+								},
+								{
+									"key": "interval_minutes",
+									"value": "30",
+									"type": "text"
+								},
+								{
+									"key": "target_seconds",
+									"value": "20",
+									"type": "text"
+								},
+								{
+									"key": "target_service_level",
+									"value": "80",
+									"type": "text"
+								},
+								{
+									"key": "shrinkage",
+									"value": "30",
+									"type": "text"
+								},
+								{
+									"key": "max_occupancy",
+									"value": "85",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/cdr/backtest",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"cdr",
+								"backtest"
+							]
+						},
+						"description": "Evaluates forecast accuracy by holding out recent data and comparing predictions with actual calls and seasonal-naive baselines."
+					},
+					"response": []
+				}
+			]
+		}
+	]
+}

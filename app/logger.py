@@ -1,48 +1,44 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
-from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
-from pathlib import Path
 
-from app.config import LOGS_DIR
+from app.config import LOG_TO_FILE, LOGS_DIR
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-7s | [%(name)s] | %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-class DailyTimedRotatingFileHandler(TimedRotatingFileHandler):
-    def __init__(self, directory: Path, prefix: str = "app_", **kwargs):
-        self.directory = directory
-        self.prefix = prefix
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        initial_filename = directory / f"{prefix}{current_date}.log"
-        super().__init__(
-            filename=str(initial_filename),
-            when="midnight",
-            interval=1,
-            backupCount=30,
-            encoding="utf-8",
-            **kwargs,
-        )
+def _file_handler(formatter: logging.Formatter) -> logging.Handler | None:
+    """logs/app.log, rotated at midnight to app.log.YYYY-MM-DD and pruned after 30 days.
 
-    def doRollover(self):
-        super().doRollover()
-        next_date = datetime.now().strftime("%Y-%m-%d")
-        self.baseFilename = os.path.abspath(str(self.directory / f"{self.prefix}{next_date}.log"))
+    A fixed base name keeps rotation and pruning working (renaming the base file each day wrote a day's
+    lines into the previous day's file and never deleted old ones). A logs folder this process can't
+    write -- e.g. a host folder mounted into the non-root container -- falls back to stdout only
+    instead of stopping the service.
+    """
+    try:
+        LOGS_DIR.mkdir(exist_ok=True)
+        handler = TimedRotatingFileHandler(
+            LOGS_DIR / "app.log", when="midnight", backupCount=30, encoding="utf-8",
+        )
+    except OSError as exc:
+        sys.stderr.write(f"File logging disabled ({exc}); logging to stdout only.\n")
+        return None
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(formatter)
+    return handler
 
 def setup_logging() -> logging.Logger:
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
 
-    if not any(isinstance(h, DailyTimedRotatingFileHandler) for h in root_logger.handlers):
+    if not any(isinstance(h, TimedRotatingFileHandler) for h in root_logger.handlers):
         formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
 
-        file_handler = DailyTimedRotatingFileHandler(directory=LOGS_DIR, prefix="app_")
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(formatter)
-        root_logger.addHandler(file_handler)
+        file_handler = _file_handler(formatter) if LOG_TO_FILE else None
+        if file_handler:
+            root_logger.addHandler(file_handler)
 
         if not any(isinstance(h, logging.StreamHandler) and h.stream == sys.stdout for h in root_logger.handlers):
             console_handler = logging.StreamHandler(sys.stdout)

@@ -4,6 +4,7 @@ import re
 import numpy as np
 import pandas as pd
 from app.core.constants import SHIFT_DEFINITIONS
+from app.core.ingestion.cleaner import clean_percent
 from app.core.queuing.peak_staffing import simulate_shift_agents
 
 def shift_definitions(start_times: list[str] | None = None) -> list[dict]:
@@ -17,6 +18,11 @@ def shift_definitions(start_times: list[str] | None = None) -> list[dict]:
     minutes = [int(value[:2]) * 60 + int(value[3:]) for value in start_times]
     if any((minutes[(index + 1) % 3] - minutes[index]) % 1440 != 480 for index in range(3)):
         raise ValueError("Shifts must start 8 hours apart, in shift order, with no gaps or overlaps.")
+    # Codes follow the clock, not the input order: the shift covering 02:00 (mid-night) is NIGHT, so the
+    # night minimum lands on it even when the list starts with the morning shift (e.g. 06:00, 14:00, 22:00).
+    night = next(index for index, minute in enumerate(minutes) if (120 - minute) % 1440 < 480)
+    minutes = minutes[night:] + minutes[:night]
+    start_times = list(start_times[night:]) + list(start_times[:night])
     result = []
     for index, minute in enumerate(minutes):
         end = (minute + 480) % 1440
@@ -41,6 +47,7 @@ def build_shift_requirements(
     target_service_level: float = 80,
     shrinkage: float = 30,
     max_agents: int = 1000,
+    max_occupancy: float = 85,
 ) -> pd.DataFrame:
     """Agents required per shift.
 
@@ -132,7 +139,7 @@ def build_shift_requirements(
             sizes = [len(shift_frame) for shift_frame in used]
             combined = pd.concat(used)
             requirements.loc[has_intervals, "required_agents"] = simulate_shift_agents(
-                volume=combined["call_volume"].to_numpy(),
+                volume=combined["expected_calls" if "expected_calls" in combined.columns else "call_volume"].to_numpy(),
                 aht_seconds=combined["aht_seconds"].to_numpy(),
                 group_starts=np.cumsum([0] + sizes[:-1]),
                 coverage_percent=float(coverage_percent),
@@ -141,6 +148,7 @@ def build_shift_requirements(
                 target_service_level=float(target_service_level),
                 shrinkage=float(shrinkage),
                 max_agents=int(max_agents),
+                max_occupancy=clean_percent(max_occupancy),
             )
 
     is_night = requirements["shift_code"] == "NIGHT"

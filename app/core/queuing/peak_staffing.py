@@ -31,6 +31,7 @@ def simulate_shift_agents(
     shrinkage: float,
     max_agents: int,
     simulations: int = SIMULATIONS,
+    max_occupancy: float = 1.0,
 ) -> np.ndarray:
     """Agents per shift such that `coverage_percent` of simulated shifts are fully covered.
 
@@ -58,6 +59,7 @@ def simulate_shift_agents(
         target_service_level=target_service_level,
         shrinkage=shrinkage,
         max_agents=max_agents,
+        max_occupancy=max_occupancy,
     )["scheduled_agents"].to_numpy()
     agents = lookup[inverse].reshape(draws.shape)
 

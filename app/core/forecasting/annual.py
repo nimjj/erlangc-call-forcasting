@@ -8,7 +8,7 @@ are modelled on a log1p scale, so weekly, annual and holiday effects are multipl
    on the weekly-adjusted series, so seasonal dips are not mistaken for trend.
 3. Damped linear trend over the recent deseasonalised series, with the level
    calibrated so the model reproduces the call total of the last four weeks.
-4. Holiday multipliers learned from history, with class defaults for unseen holidays.
+4. Holiday multipliers learned from history alone; holidays the history never shows are not adjusted.
 5. Daily totals split into intervals with recent weekday intraday profiles, rounded
    with largest remainders so interval counts add up to the daily total.
 """
@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.seasonal import STL
 
-from app.core.forecasting.calendar import DEFAULT_MULTIPLIERS, holiday_class, us_holidays
+from app.core.forecasting.calendar import us_holidays
 
 MIN_ANNUAL_HISTORY_DAYS = 365
 TREND_DAMPING_PER_WEEK = 0.6
@@ -83,6 +83,20 @@ def _profiles(call_series: pd.Series, intervals_per_day: int, excluded: pd.Datet
     return profiles, normalise(holiday_counts, weekday_mean)
 
 
+def _holiday_multipliers(ratios: dict[str, list[float]], names) -> dict[str, float]:
+    """Holiday effects taken from the history alone.
+
+    The model knows the date of each US holiday but not how this centre treats it, so a holiday the
+    history shows is forecast as the history behaved (median of its past ratios to a normal day), and
+    one the history never shows (or only on near-empty days) gets no adjustment. Blending in a fixed
+    default per holiday type cut a normal Christmas or Thanksgiving by about 40%.
+    """
+    return {
+        name: float(np.clip(np.median(ratios[name]), 0, 3)) if ratios.get(name) else 1.0
+        for name in names
+    }
+
+
 def _allocate(daily_total: float, profile: np.ndarray) -> np.ndarray:
     total = int(round(daily_total))
     expected = total * profile
@@ -98,8 +112,12 @@ def predict_annual(
     future_index: pd.DatetimeIndex,
     intervals_per_day: int,
     trend_lookback_days: int,
-) -> tuple[np.ndarray, dict]:
-    """Forecast interval call counts for future_index from a zero-filled interval history."""
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Forecast interval calls for future_index from a zero-filled interval history.
+
+    Returns whole calls per interval (they add up to each day's total), the unrounded expectation the
+    staffing uses, and the model components.
+    """
     daily = call_series.resample("D").sum()
     days = daily.index
     if len(days) < MIN_ANNUAL_HISTORY_DAYS:
@@ -166,27 +184,25 @@ def predict_annual(
             expected = expected_history[days.get_loc(day)]
             if expected >= 1:
                 ratios.setdefault(name, []).append(float(daily[day] / expected))
-    multipliers = {}
-    for name in set(holidays.values):
-        prior = DEFAULT_MULTIPLIERS[holiday_class(name)]
-        observed = ratios.get(name, [])
-        weight = len(observed) / (len(observed) + 1)
-        learned = float(np.median(observed)) if observed else prior
-        multipliers[name] = float(np.clip(weight * learned + (1 - weight) * prior, 0, 3))
+    multipliers = _holiday_multipliers(ratios, set(holidays.values))
     future_holidays = holidays.reindex(future_days)
     holiday_factor = np.array([multipliers[name] if isinstance(name, str) else 1.0 for name in future_holidays])
     future_daily = future_daily * holiday_factor
 
     profiles, holiday_profile = _profiles(call_series, intervals_per_day, days[masked], days[is_holiday])
     by_day = {}
+    expected_by_day = {}
     for day, total, factor in zip(future_days, future_daily, holiday_factor):
         profile = holiday_profile if factor < 0.9 else profiles[day.dayofweek]
         by_day[day] = _allocate(total, profile)
+        # Unrounded, for staffing: a 0.2-call slot still needs an agent even though it rounds to 0.
+        expected_by_day[day] = total * profile
     slots = ((future_index.hour * 60 + future_index.minute) // (1440 // intervals_per_day)).to_numpy()
     values = np.array([by_day[day][slot] for day, slot in zip(future_index.normalize(), slots)], dtype=np.int64)
+    expected = np.array([expected_by_day[day][slot] for day, slot in zip(future_index.normalize(), slots)], dtype=float)
 
     annual_curve = _fourier(pd.date_range("2001-01-01", periods=365, freq="D"), harmonics) @ annual_coefficients
-    return values, {
+    return values, expected, {
         "model_variant": "daily_stl_annual",
         "annual_seasonality": True,
         "annual_harmonics": harmonics,
